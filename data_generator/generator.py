@@ -41,8 +41,13 @@ class DataGenerator:
         returns_dict = self.parser.get_returns()
         symbols = sorted(returns_dict.keys())
 
-        if len(symbols) != self.scenario_size:
-            print(f"Warning: Found {len(symbols)} stocks, expected {self.scenario_size}")
+        if len(symbols) > self.scenario_size:
+            print(f"Found {len(symbols)} stocks, selecting first {self.scenario_size}")
+            symbols = symbols[:self.scenario_size]
+        elif len(symbols) < self.scenario_size:
+            raise ValueError(
+                f"Not enough stocks. Found {len(symbols)}, need {self.scenario_size}"
+            )
 
         # Find the minimum length (common trading days)
         min_length = min(len(returns_dict[s]) for s in symbols)

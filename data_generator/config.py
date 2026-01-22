@@ -8,8 +8,8 @@ STOCKNET_CONFIG = {
     "t": 32,              # Number of trading days per stock
     "WINDOW_STEP": 1,     # Sliding window step size (days)
     "DATA_PATH": "stocknet-dataset/price/preprocessed/",
-    "OUTPUT_PATH": "output/",
-    "EXCLUDED_STOCKS": ["GMRE", "AGFS", "BABA", "ABBV", "PTR", "REX", "SNP", "BRK-A"],  # Stocks with insufficient data or special cases
+    "OUTPUT_PATH": "../data",
+    "EXCLUDED_STOCKS": ["GMRE", "AGFS", "BABA", "ABBV", "PTR", "REX", "SNP", "BRK-A"],
 }
 
 # Default configuration (can be changed based on dataset)

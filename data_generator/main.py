@@ -19,18 +19,6 @@ def generate_stocknet():
     data_path = os.path.join(script_dir, config["DATA_PATH"])
     output_path = os.path.join(script_dir, config["OUTPUT_PATH"])
 
-    print("=" * 50)
-    print("Stocknet Data Generator")
-    print("=" * 50)
-    print(f"Configuration:")
-    print(f"  SCENARIO_SIZE: {config['SCENARIO_SIZE']}")
-    print(f"  t (days per stock): {config['t']}")
-    print(f"  Window step: {config['WINDOW_STEP']}")
-    print(f"  Excluded stocks: {config.get('EXCLUDED_STOCKS', [])}")
-    print(f"  Data path: {data_path}")
-    print(f"  Output path: {output_path}")
-    print("=" * 50)
-
     # Create parser
     parser = StocknetParser(data_path, excluded_stocks=config.get("EXCLUDED_STOCKS", []))
 
@@ -53,7 +41,7 @@ def generate_stocknet():
 
     # Save results
     print("\nSaving results...")
-    generator.save(scenarios, output_path, "stocknet_scenarios.npy")
+    generator.save(scenarios, output_path, "stocknet_scenarios64.npy")
 
     # Print summary
     print("\n" + "=" * 50)
@@ -77,7 +65,6 @@ def main():
         type=str,
         default="stocknet",
         choices=["stocknet"],
-        help="Dataset to process (default: stocknet)"
     )
 
     args = parser.parse_args()

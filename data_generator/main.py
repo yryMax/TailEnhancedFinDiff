@@ -41,7 +41,7 @@ def generate_stocknet():
 
     # Save results
     print("\nSaving results...")
-    generator.save(scenarios, output_path, "stocknet_scenarios64.npy")
+    generator.save(scenarios, output_path, "stocknet_scenarios.npy")
 
     # Print summary
     print("\n" + "=" * 50)

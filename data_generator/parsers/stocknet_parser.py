@@ -16,12 +16,14 @@ class StocknetParser(BaseParser):
     (tab-separated, dates in descending order)
     """
 
-    def __init__(self, data_path: str):
+    def __init__(self, data_path: str, excluded_stocks: list = None):
         """
         Args:
             data_path: Path to the preprocessed price data directory.
+            excluded_stocks: List of stock symbols to exclude.
         """
         self.data_path = data_path
+        self.excluded_stocks = set(excluded_stocks) if excluded_stocks else set()
         self._returns: Dict[str, np.ndarray] = {}
         self._dates: Dict[str, np.ndarray] = {}
 
@@ -39,6 +41,8 @@ class StocknetParser(BaseParser):
 
         for filename in txt_files:
             symbol = filename.replace('.txt', '')
+            if symbol in self.excluded_stocks:
+                continue
             filepath = os.path.join(self.data_path, filename)
 
             dates = []

@@ -26,12 +26,13 @@ def generate_stocknet():
     print(f"  SCENARIO_SIZE: {config['SCENARIO_SIZE']}")
     print(f"  t (days per stock): {config['t']}")
     print(f"  Window step: {config['WINDOW_STEP']}")
+    print(f"  Excluded stocks: {config.get('EXCLUDED_STOCKS', [])}")
     print(f"  Data path: {data_path}")
     print(f"  Output path: {output_path}")
     print("=" * 50)
 
     # Create parser
-    parser = StocknetParser(data_path)
+    parser = StocknetParser(data_path, excluded_stocks=config.get("EXCLUDED_STOCKS", []))
 
     # Load data
     print("\nLoading data...")

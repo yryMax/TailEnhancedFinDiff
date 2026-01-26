@@ -34,14 +34,12 @@ class BaseParser(ABC):
         pass
 
     @abstractmethod
-    def interpolate_missing(self, data: np.ndarray) -> np.ndarray:
+    def get_scenario(self, output_path: str = None):
         """
-        Interpolate missing values in the data.
-
+        Load data and return as numpy array, align the temporal dimension as preferred.
         Args:
-            data: Input array that may contain NaN values.
-
+            output_path: If provided, save the numpy array to this path.
         Returns:
-            Array with missing values interpolated.
+            Numpy array of shape (num_stocks, num_days) with return series.
         """
         pass

@@ -9,7 +9,7 @@ STOCKNET_CONFIG = {
     "WINDOW_STEP": 1257,     # Sliding window step size (days)
     "DATA_PATH": "stocknet-dataset/price/preprocessed/",
     "OUTPUT_PATH": "../data",
-    "EXCLUDED_STOCKS": ["GMRE", "AGFS", "BABA", "ABBV", "PTR", "REX", "SNP", "BRK-A"],
+    "EXCLUDED_STOCKS": ["GMRE", "AGFS", "BABA", "ABBV", "PTR", "REX", "SNP"],
 }
 
 # Default configuration (can be changed based on dataset)

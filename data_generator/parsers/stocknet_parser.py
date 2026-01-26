@@ -17,120 +17,84 @@ class StocknetParser(BaseParser):
     """
 
     def __init__(self, data_path: str, excluded_stocks: list = None):
-        """
-        Args:
-            data_path: Path to the preprocessed price data directory.
-            excluded_stocks: List of stock symbols to exclude.
-        """
         self.data_path = data_path
         self.excluded_stocks = set(excluded_stocks) if excluded_stocks else set()
         self._returns: Dict[str, np.ndarray] = {}
         self._dates: Dict[str, np.ndarray] = {}
 
     def load_data(self) -> Dict[str, np.ndarray]:
-        """
-        Load all stock data from txt files.
-
-        Returns:
-            Dict mapping stock symbol to its return series (sorted by date ascending).
-        """
+        """Load all stock data from txt files."""
         if self._returns:
             return self._returns
 
-        txt_files = [f for f in os.listdir(self.data_path) if f.endswith('.txt')]
-
-        for filename in txt_files:
+        for filename in os.listdir(self.data_path):
+            if not filename.endswith('.txt'):
+                continue
             symbol = filename.replace('.txt', '')
             if symbol in self.excluded_stocks:
                 continue
-            filepath = os.path.join(self.data_path, filename)
 
-            dates = []
-            returns = []
-
-            with open(filepath, 'r') as f:
+            dates, returns = [], []
+            with open(os.path.join(self.data_path, filename), 'r') as f:
                 for line in f:
                     parts = line.strip().split('\t')
                     if len(parts) >= 2:
-                        date = parts[0]
-                        movement_percent = float(parts[1])
-                        dates.append(date)
-                        returns.append(movement_percent)
+                        dates.append(parts[0])
+                        returns.append(float(parts[1]))
 
-            # Data is in descending order, reverse to ascending
-            dates = dates[::-1]
-            returns = returns[::-1]
-
-            self._dates[symbol] = np.array(dates)
-            self._returns[symbol] = np.array(returns)
+            # Reverse from descending to ascending order
+            self._dates[symbol] = np.array(dates[::-1])
+            self._returns[symbol] = np.array(returns[::-1])
 
         return self._returns
+
+    def get_scenario(self, output_path: str = None) -> np.ndarray:
+        """
+        Get aligned scenario matrix for all stocks.
+
+        Args:
+            output_path: If provided, save the scenario matrix as .npy file.
+
+        Returns:
+            np.ndarray of shape (n_stocks, n_timesteps)
+        """
+        if not self._returns:
+            self.load_data()
+
+        # 1. Build unified timeline (union of all dates)
+        all_dates = set()
+        for dates in self._dates.values():
+            all_dates.update(dates.tolist())
+        timeline = np.array(sorted(all_dates))
+        n_time = len(timeline)
+
+        # 2. Build matrix with NaN for missing values
+        symbols = sorted(self._returns.keys())
+        scenario = np.full((len(symbols), n_time), np.nan)
+
+        date_to_idx = {d: i for i, d in enumerate(timeline)}
+        for i, symbol in enumerate(symbols):
+            for j, date in enumerate(self._dates[symbol]):
+                scenario[i, date_to_idx[date]] = self._returns[symbol][j]
+
+        # 3. Interpolate missing values per row
+        for i in range(len(symbols)):
+            row = scenario[i]
+            valid = ~np.isnan(row)
+            if valid.any() and not valid.all():
+                scenario[i] = np.interp(np.arange(n_time), np.where(valid)[0], row[valid])
+
+        if output_path is not None:
+            np.save(output_path, scenario)
+
+        return scenario
 
     def get_returns(self) -> Dict[str, np.ndarray]:
-        """
-        Get return series for all stocks.
-
-        Returns:
-            Dict mapping stock symbol to its return series.
-        """
         if not self._returns:
             self.load_data()
         return self._returns
 
-    def get_dates(self, symbol: str) -> np.ndarray:
-        """
-        Get date series for a specific stock.
-
-        Args:
-            symbol: Stock symbol.
-
-        Returns:
-            Array of dates.
-        """
-        if not self._dates:
-            self.load_data()
-        return self._dates.get(symbol, np.array([]))
-
-    def interpolate_missing(self, data: np.ndarray) -> np.ndarray:
-        """
-        Interpolate missing values using linear interpolation.
-
-        Args:
-            data: Input array that may contain NaN values.
-
-        Returns:
-            Array with missing values interpolated.
-        """
-        if not np.any(np.isnan(data)):
-            return data
-
-        result = data.copy()
-        nan_mask = np.isnan(result)
-
-        if np.all(nan_mask):
-            # All values are NaN, fill with zeros
-            return np.zeros_like(result)
-
-        # Get indices of valid and invalid values
-        valid_indices = np.where(~nan_mask)[0]
-        invalid_indices = np.where(nan_mask)[0]
-
-        # Linear interpolation
-        result[invalid_indices] = np.interp(
-            invalid_indices,
-            valid_indices,
-            result[valid_indices]
-        )
-
-        return result
-
     def get_stock_symbols(self) -> list:
-        """
-        Get list of all stock symbols.
-
-        Returns:
-            List of stock symbols.
-        """
         if not self._returns:
             self.load_data()
-        return sorted(list(self._returns.keys()))
+        return sorted(self._returns.keys())

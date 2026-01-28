@@ -33,17 +33,13 @@ cosine noise scheduler, 200 sampling step.
 
 For stationary bootstrap, we set the block size = 8 (p = 0.125)
 
-## Evaluations
+Then we sample scenarios and overall we get [sample_size, 81] samples from each benchmark,
+and we compare the generated samples with the training data using various metrics. 
+We mainly focus on distribution similarity and marginal statistics of each asset. the sampling size is 
+decided by following process.
 
-### Distribution with the training data.
 
-
-
-In the end we get an dataset of shape [1250, 8, 8]. This is how we trained the factor model.
-Afterwards, to test the factor model, we generate 128 scenarios to get the shape of [128, 8, 8]. Then we evaluate the sampled data distribution compared to the training data.
-
-To test the stationary bootstrap, we sampled [1257, 8] and use window size 8 and stride 1 to get [1250, 8] on both training data and resampled data.
-#### Evaluation Results
+## Evaluation Results
 
 | Method | MMD | Cov Error | ES (5%) | ACF | Mean | Std | Skew | Kurt |
 |--------|-----|-----------|---------|-----|------|-----|------|------|
@@ -59,6 +55,8 @@ Stationary Bootstrap
 
 ### Appendix: Metrics
 
+#### Distribution Similarity
+
 **MMD (Maximum Mean Discrepancy)** measures the distance between two distributions using a Gaussian RBF kernel. Lower is better.
 
 $$\text{MMD}^2 = \frac{1}{n(n-1)}\sum_{i \neq j} k(x_i, x_j) + \frac{1}{m(m-1)}\sum_{i \neq j} k(y_i, y_j) - \frac{2}{nm}\sum_{i,j} k(x_i, y_j)$$
@@ -70,17 +68,16 @@ where $k(a, b) = \exp\left(-\frac{\|a - b\|^2}{2\sigma^2}\right)$, $\sigma$ is t
 $$\text{Cov Error} = \frac{\|\Sigma_{sample} - \Sigma_{train}\|_F}{\|\Sigma_{train}\|_F}$$
 
 where $\Sigma_{sample}, \Sigma_{train} \in \mathbb{R}^{d \times d}$ are the covariance matrices of d assets.
-#### ES (Expected Shortfall / CVaR)
-Left tail Expected Shortfall at $\alpha = 5\%$:
 
-$$\text{ES}_\alpha = \mathbb{E}[X \mid X \leq \text{VaR}_\alpha]$$
-
-where $\text{VaR}_\alpha$ is the $\alpha$-quantile (5th percentile).
 
 #### Marginal Statistics
-- **Mean**: $\bar{x} = \frac{1}{n}\sum_i x_i$
-- **Std**: $\sigma = \sqrt{\frac{1}{n}\sum_i (x_i - \bar{x})^2}$
-- **Skew**: $\gamma_1 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^3\right]$
-- **Kurt** (Excess Kurtosis): $\gamma_2 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^4\right] - 3$
+- **Left ES (Expected Shortfall / CVaR)** measures the left tail behavior of the scenarios
+$$\text{ES}_\alpha = \mathbb{E}[X \mid X \leq \text{VaR}_\alpha]$$
+where $\text{VaR}_\alpha$ is the $\alpha$-quantile. We use $\alpha = 5\%$ and only consider left tail.
+- **Mean** summarizes the central tendency of the scenarios $\bar{x} = \frac{1}{n}\sum_i x_i$
+- **Std** measures volatility $\sigma = \sqrt{\frac{1}{n}\sum_i (x_i - \bar{x})^2}$
+- **Skew** measures asymmetry of the distribution $\gamma_1 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^3\right]$
+- **Kurt (Excess Kurtosis)** measures tail heaviness and peakedness relative to a normal distribution; higher values indicate more extreme outliers/heavier tails. 
+$\gamma_2 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^4\right] - 3$
 
-All computed on flattened data across all samples.
+All marginal statistics are computed asset-wise, their mean and std across all assets are reported.

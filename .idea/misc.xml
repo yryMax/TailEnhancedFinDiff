@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="adaexam" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="adaexam" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="diffusion_factor_model" project-jdk-type="Python SDK" />
 </project>

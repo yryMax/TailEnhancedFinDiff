@@ -48,11 +48,12 @@ Based on the above results, we choose sample size = 2048 for both methods. This 
 
 ## Evaluation Results
 
-| Method | MMD | Cov Error | ES (5%) | ACF | Mean | Std | Skew | Kurt |
-|--------|-----|-----------|---------|-----|------|-----|------|------|
-| GT | - | - | -0.0306 | 0.0716 | 0.0006 | 0.0136 | 0.1767 | 12.1850 |
-| factor_DM | 0.002790 | 0.307484 | -0.0304 | 0.0759 | 0.0011 | 0.0128 | -0.4561 | 5.5397 |
-| stationary bootstrap | 0.000000 | 0.210477 | -0.0357 | 0.0757 | 0.0007 | 0.0157 | -0.0017 | 5.9343 |
+| Method | MMD↓   | Cov↓ | ES↓ | Mean↓ | Std↓ | Skew↓ | Kurt↓ |
+|---|-------|---|---|---|---|---|---|
+| FactorDM | 0.0412 | 0.1943 | 0.0979±0.05 | -0.4953±3.00 | -0.1006±0.03 | -1.3566±3.26 | -0.3632±0.28 |
+| Stationary Bootstrap | 0.0000 | 0.0785 | 0.0257±0.04 | 0.3907±1.56 | -0.0082±0.03 | 2.2752±17.37 | -0.0423±0.23 |
+
+<center> Result on Distribution Comparing</center>
 
 ![Distribution Comparison](output.png)
  Factor_DM
@@ -87,4 +88,4 @@ where $\text{VaR}_\alpha$ is the $\alpha$-quantile. We use $\alpha = 5\%$ and on
 - **Kurt (Excess Kurtosis)** measures tail heaviness and peakedness relative to a normal distribution; higher values indicate more extreme outliers/heavier tails. 
 $\gamma_2 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^4\right] - 3$
 
-All marginal statistics are computed asset-wise, their mean and std across all assets are reported.
+All marginal statistics are computed asset-wise and we record the relative value comparing to GT, their mean and std across all assets are reported.

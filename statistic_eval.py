@@ -57,44 +57,55 @@ def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
     return np.linalg.norm(cov_X - cov_Y, 'fro') / (np.linalg.norm(cov_Y, 'fro') + 1e-10)
 
 
-@MetricRegistry.register('ES', compare=False)
-def compute_es(data: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
-    """Compute ES per asset, return mean and std across assets."""
+def _compute_es_per_asset(data: np.ndarray, alpha: float = 0.05) -> np.ndarray:
+    """Helper: compute ES for each asset."""
     d = data.shape[1]
-    es_per_asset = np.zeros(d)
+    es = np.zeros(d)
     for i in range(d):
         col = data[:, i]
         var = np.percentile(col, alpha * 100)
-        es_per_asset[i] = np.mean(col[col <= var])
-    return {'mean': np.mean(es_per_asset), 'std': np.std(es_per_asset)}
+        es[i] = np.mean(col[col <= var])
+    return es
 
 
-@MetricRegistry.register('Mean', compare=False)
-def compute_mean(data: np.ndarray) -> Dict[str, float]:
-    """Compute mean per asset."""
-    per_asset = np.mean(data, axis=0)
-    return {'mean': np.mean(per_asset), 'std': np.std(per_asset)}
+@MetricRegistry.register('ES', compare=True)
+def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> Dict[str, float]:
+    """Relative ES error: (X - Y) / Y per asset."""
+    es_X, es_Y = _compute_es_per_asset(X, alpha), _compute_es_per_asset(Y, alpha)
+    relative = (es_X - es_Y) / (np.abs(es_Y) + 1e-10)
+    return {'mean': np.mean(relative), 'std': np.std(relative)}
 
 
-@MetricRegistry.register('Std', compare=False)
-def compute_std(data: np.ndarray) -> Dict[str, float]:
-    """Compute std per asset."""
-    per_asset = np.std(data, axis=0)
-    return {'mean': np.mean(per_asset), 'std': np.std(per_asset)}
+@MetricRegistry.register('Mean', compare=True)
+def compute_mean(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+    """Relative mean error: (X - Y) / Y per asset."""
+    mean_X, mean_Y = np.mean(X, axis=0), np.mean(Y, axis=0)
+    relative = (mean_X - mean_Y) / (np.abs(mean_Y) + 1e-10)
+    return {'mean': np.mean(relative), 'std': np.std(relative)}
 
 
-@MetricRegistry.register('Skew', compare=False)
-def compute_skew(data: np.ndarray) -> Dict[str, float]:
-    """Compute skewness per asset."""
-    per_asset = skew(data, axis=0)
-    return {'mean': np.mean(per_asset), 'std': np.std(per_asset)}
+@MetricRegistry.register('Std', compare=True)
+def compute_std(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+    """Relative std error: (X - Y) / Y per asset."""
+    std_X, std_Y = np.std(X, axis=0), np.std(Y, axis=0)
+    relative = (std_X - std_Y) / (np.abs(std_Y) + 1e-10)
+    return {'mean': np.mean(relative), 'std': np.std(relative)}
 
 
-@MetricRegistry.register('Kurt', compare=False)
-def compute_kurt(data: np.ndarray) -> Dict[str, float]:
-    """Compute kurtosis per asset."""
-    per_asset = kurtosis(data, axis=0)
-    return {'mean': np.mean(per_asset), 'std': np.std(per_asset)}
+@MetricRegistry.register('Skew', compare=True)
+def compute_skew(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+    """Relative skew error: (X - Y) / Y per asset."""
+    skew_X, skew_Y = skew(X, axis=0), skew(Y, axis=0)
+    relative = (skew_X - skew_Y) / (np.abs(skew_Y) + 1e-10)
+    return {'mean': np.mean(relative), 'std': np.std(relative)}
+
+
+@MetricRegistry.register('Kurt', compare=True)
+def compute_kurt(X: np.ndarray, Y: np.ndarray) -> Dict[str, float]:
+    """Relative kurt error: (X - Y) / Y per asset."""
+    kurt_X, kurt_Y = kurtosis(X, axis=0), kurtosis(Y, axis=0)
+    relative = (kurt_X - kurt_Y) / (np.abs(kurt_Y) + 1e-10)
+    return {'mean': np.mean(relative), 'std': np.std(relative)}
 
 
 # ============== Result Classes ==============
@@ -129,11 +140,11 @@ class EvalResultCollection:
     def append(self, result: EvalResult):
         self.results.append(result)
 
-    def _format_value(self, value: Any) -> str:
+    def _format_value(self, value: Any, mean_prec: int = 2, std_prec: int = 2) -> str:
         if isinstance(value, dict) and 'mean' in value:
-            return f"{value['mean']:.2f}±{value['std']:.2f}"
+            return f"{value['mean']:.{mean_prec}f}±{value['std']:.{std_prec}f}"
         elif isinstance(value, (int, float, np.floating)):
-            return f"{float(value):.2f}"
+            return f"{float(value):.{mean_prec}f}"
         return str(value)
 
     def to_console(self):
@@ -144,7 +155,7 @@ class EvalResultCollection:
         print("=" * 70)
 
         # Header
-        header = ["Metric", "Training"] + [r.name for r in self.results]
+        header = ["Metric"] + [r.name for r in self.results]
         print(f"{header[0]:<10}", end="")
         for h in header[1:]:
             print(f"{h:>20}", end="")
@@ -155,14 +166,6 @@ class EvalResultCollection:
         all_metrics = list(MetricRegistry.get_all().keys())
         for metric_name in all_metrics:
             print(f"{metric_name:<10}", end="")
-
-            # Training value
-            if metric_name in self.training_metrics:
-                print(f"{self._format_value(self.training_metrics[metric_name]):>20}", end="")
-            else:
-                print(f"{'-':>20}", end="")
-
-            # Generated values
             for r in self.results:
                 if metric_name in r.metrics:
                     print(f"{self._format_value(r.metrics[metric_name]):>20}", end="")
@@ -171,32 +174,23 @@ class EvalResultCollection:
             print()
 
     def to_markdown(self) -> str:
-        """Generate markdown table."""
+        """Generate markdown table (rows=methods, cols=metrics)."""
         lines = []
+        all_metrics = list(MetricRegistry.get_all().keys())
 
-        # Header
-        header = ["Metric", "Training"] + [r.name for r in self.results]
+        # Header: Method | MMD | Cov | ES | Mean | Std | Skew | Kurt
+        header = ["Method"] + all_metrics
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "|".join(["---"] * len(header)) + "|")
 
-        # Rows
-        all_metrics = list(MetricRegistry.get_all().keys())
-        for metric_name in all_metrics:
-            row = [metric_name]
-
-            # Training value
-            if metric_name in self.training_metrics:
-                row.append(self._format_value(self.training_metrics[metric_name]))
-            else:
-                row.append("-")
-
-            # Generated values
-            for r in self.results:
+        # Rows for each generated dataset
+        for r in self.results:
+            row = [r.name]
+            for metric_name in all_metrics:
                 if metric_name in r.metrics:
-                    row.append(self._format_value(r.metrics[metric_name]))
+                    row.append(self._format_value(r.metrics[metric_name], mean_prec=4, std_prec=2))
                 else:
                     row.append("-")
-
             lines.append("| " + " | ".join(row) + " |")
 
         return "\n".join(lines)
@@ -213,28 +207,17 @@ class Evaluator:
             raise ValueError(f"Training data must be 2D [samples, assets]. Got {Y.ndim}D")
         self.Y = Y
         self.results = EvalResultCollection(training_shape=Y.shape)
-        self._compute_training_metrics()
-
-    def _compute_training_metrics(self):
-        """Compute metrics for training data (non-compare metrics only)."""
-        for name, info in MetricRegistry.get_all().items():
-            if not info['compare']:
-                self.results.training_metrics[name] = info['func'](self.Y)
 
     def add(self, X: np.ndarray, name: str) -> 'Evaluator':
-        """Add a generated dataset and compute metrics."""
+        """Add a generated dataset and compute metrics (all relative to training)."""
         if X.ndim != 2:
             raise ValueError(f"Generated data must be 2D [samples, assets]. Got {X.ndim}D")
         if X.shape[1] != self.Y.shape[1]:
             raise ValueError(f"Asset dimension mismatch: X has {X.shape[1]}, Y has {self.Y.shape[1]}")
 
         result = EvalResult(name=name, shape=X.shape)
-
         for metric_name, info in MetricRegistry.get_all().items():
-            if info['compare']:
-                result.metrics[metric_name] = info['func'](X, self.Y)
-            else:
-                result.metrics[metric_name] = info['func'](X)
+            result.metrics[metric_name] = info['func'](X, self.Y)
 
         self.results.append(result)
         return self
@@ -248,12 +231,12 @@ class Evaluator:
 
 if __name__ == "__main__":
     training = np.load("data/stocknet_81.npy")
-    factor_dm = np.load("samples/factorDM128.npy")
-    bootstrap = np.load("samples/SB128.npy")
+    factor_dm = np.load("samples/factorDM2048.npy")
+    bootstrap = np.load("samples/SB2048.npy")
 
     results = (Evaluator(training)
         .add(factor_dm, "FactorDM")
-        .add(bootstrap, "Bootstrap")
+        .add(bootstrap, "Stationary Bootstrap")
         .report())
 
     results.to_console()

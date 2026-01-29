@@ -55,11 +55,8 @@ Based on the above results, we choose sample size = 2048 for both methods. This 
 
 <center> Result on Distribution Comparing</center>
 
-![Distribution Comparison](output.png)
- Factor_DM
-![Distribution Comparison](outputSB.png)
-Stationary Bootstrap 
 
+![distribution.png](assets/distribution.png)
 
 ### Appendix: Metrics
 

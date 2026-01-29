@@ -31,13 +31,20 @@ cosine noise scheduler, 200 sampling step.
 ![img.png](assets/img.png)
 <center> Training Loss (MSE)</center>
 
-For stationary bootstrap, we set the block size = 8 (p = 0.125)
+For stationary bootstrap, we set the block size = 8 (p = 0.125), we stop until we got [1257, 81], when
+sampling we randomly select 1 cross-section with replacement.
 
 Then we sample scenarios and overall we get [sample_size, 81] samples from each benchmark,
 and we compare the generated samples with the training data using various metrics. 
-We mainly focus on distribution similarity and marginal statistics of each asset. the sampling size is 
+We mainly focus on distribution similarity and marginal statistics of each asset. The sampling size is 
 decided by following process.
+1. Generate 4096 samples from each method
+2. Slice it as [32, 64, 128, 256, 512, 1024, 2048, 4096]
+3. Choose the size that gives a stable mean.
 
+![sample_size.png](assets/sample_size.png)
+
+Based on the above results, we choose sample size = 2048 for both methods. This balances stability and efficiency
 
 ## Evaluation Results
 

@@ -2,20 +2,43 @@
 ## Dataset
 
 ### [stocknet](https://github.com/yumoxu/stocknet-dataset)
-Stocknet tracks Two-year price movements from 01/01/2014 to 01/01/2016 of 88 stocks are selected to target, 
+Stocknet tracks Two-year price movements from 2012-09-04 to 2017-09-01 of 88 stocks are selected to target, 
 coming from all the 8 stocks in the Conglomerates sector and the top 10 stocks in 
 capital size in each of the other 8 sectors.
 
 The preprocessing steps are as follows:
 1. For each stock, extract movement percent (daily return of close price): $r_t = (P_t - P_{t-1}) / P_{t-1}$
-2. Remove stocks that has missing days (81 days left)
+2. Remove stocks that has missing days (81 stocks left)
 3. Missing values are handled using linear interpolation
 
 The final dataset has shape [1257, 81] (1257 days, 81 stocks).
 
-### S & P 500 (self made) [TODO]
+### S & P 500 (self made)
+
+The collected dataset from https://www.kaggle.com/datasets/camnugent/sandp500/data 
+
+contains 2013-02-08 to 2018-02-07 of SP500 constituent stocks
+
+1. For each stock, extract movement percent (daily return of close price): $r_t = (P_t - P_{t-1}) / P_{t-1}$
+2. Remove stocks that has missing days (470 days left)
+3. Missing values are handled using linear interpolation
+
+The final dataset has shape [1258, 470] (1258 days, 470 stocks).
 
 
+
+
+
+how to decide the stockset？
+
+- if we only select the subset via a timespan it includes bias
+
+how to decide the timespan？
+
+The empirical verification
+
+- the S&P 500 index captures approximately 80% of the total available market capitalization.
+- for the correlation how to (quantitatively) value the effect of stocks we are not included.
 
 ## Benchmarks
 

@@ -48,9 +48,16 @@ We mainly focus on distribution similarity and marginal statistics of each asset
 decided by following process.
 1. Generate 4096 samples from each method
 2. Slice it as [32, 64, 128, 256, 512, 1024, 2048, 4096]
-3. Choose the size that gives a stable mean.
+3. Choose the size that gives a stable mean of the distance to the training set.
 
-![sample_size.png](assets/sample_size.png)
+<div>
+  <img src="assets/convergence_experiment2.png" alt="converge_experiment2" style="max-width:49%; height:auto; object-fit:contain;">
+  <img src="assets/convergence_experiment.png" alt="convergence_experiment" style="max-width:49%; height:auto; object-fit:contain;">
+</div>
+<div style="text-align:center; margin-top:8px; min-height:2em;">
+  <span id="figure-name" style="display:inline-block; padding:4px 8px; border-top:1px solid #ddd;">
+Distance of all stocks(left) and largest variance stock(right) with the training set</span>
+</div>
 
 Based on the above results, we choose sample size = 2048 for both methods. This balances stability and efficiency
 

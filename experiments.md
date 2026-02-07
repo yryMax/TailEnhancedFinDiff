@@ -20,25 +20,10 @@ The collected dataset from https://www.kaggle.com/datasets/camnugent/sandp500/da
 contains 2013-02-08 to 2018-02-07 of SP500 constituent stocks
 
 1. For each stock, extract movement percent (daily return of close price): $r_t = (P_t - P_{t-1}) / P_{t-1}$
-2. Remove stocks that has missing days (470 days left)
+2. Remove stocks that has missing days (470 stocks left)
 3. Missing values are handled using linear interpolation
 
-The final dataset has shape [1258, 470] (1258 days, 470 stocks).
-
-
-
-
-
-how to decide the stockset？
-
-- if we only select the subset via a timespan it includes bias
-
-how to decide the timespan？
-
-The empirical verification
-
-- the S&P 500 index captures approximately 80% of the total available market capitalization.
-- for the correlation how to (quantitatively) value the effect of stocks we are not included.
+The final dataset has shape (491, 4278) (4278 days, 491 stocks).
 
 ## Benchmarks
 

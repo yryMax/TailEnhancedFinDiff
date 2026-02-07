@@ -212,3 +212,6 @@ __marimo__/
 stocknet-dataset/
 output/
 .claude/
+
+data_generator/SP500
+data_generator/.idea

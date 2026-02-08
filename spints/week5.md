@@ -50,19 +50,28 @@ Hard guidance that substitute (part-of) the intermediate samples.
 
 
 #### Definition
+The first equation describes the expected excess return of an asset, while the second equation describes the realized excess return.
 $$\mathbb{E}[R_{i,t} - R_{f,t}] = \beta_{i,t}^\top \lambda_t$$
 $$R_{i,t} - R_{f,t} = \beta_{i,t}^\top f_t + \varepsilon_{i,t}$$
 where:
+- $R_{i,t}$: The return of asset $i$ at time $t$. 
+- $R_{f,t}$: The risk-free rate at time $t$.
+- $\beta_{i,t} \in \mathbb{R}^{K}$: The factor exposures (or loadings) of asset $i$ to $K$ risk factors at time $t$.
+- $\lambda_t \in \mathbb{R}^{K}$: The factor risk premia at time $t$. This represents the expected excess return for a unit exposure to each risk factor.
+- $f_t \in \mathbb{R}^{K}$: The factor returns at time $t$. These are systematic, economy-wide risk factors that affect all assets to some degree. As a prior, these factors are assumed to be time-varying and capture the common movements in the market (e.g., market return, interest rate changes, volatility).
+- $\varepsilon_{i,t}$: The idiosyncratic return (or error term) for asset $i$ at time $t$. It represents the portion of the asset's return that is not explained by the common factors. It is assumed to be uncorrelated with the factors and have a mean of zero, i.e., $\mathbb{E}[\varepsilon_{i,t}] = 0$ and $\text{Cov}(\varepsilon_{i,t}, f_t) = 0$.
 
+#### The Prior
+There have been enough evidence that latent factors exists (means there is an interpolatable and continuous representation that expresses the correlation between assets), for example [IPCA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2983919) shows that under a structured conditional factor model where characteristics instrument time-varying loadings, the cross-section of returns admits an accurate low-rank representation.
 
-There have been enough evidence that latent factors exists
-(means there is an interpolatable and continuous representation that expresses the correlation between assets), 
-for example [IPCA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2983919) shows that  under a structured conditional factor model where characteristics instrument time-varying loadings, the cross-section of returns admits an accurate low-rank representation.
+- $R_{i,t}$ can be decomposed into a risk-free rate, systematic (factor-driven) components, and idiosyncratic noise. Empirically, returns exhibit non-normal characteristics like fat tails, skewness, and volatility clustering.
 
+- The risk-free rate $R_{f,t}$ is typically treated as an observable. While time-varying, its dynamics are stable and predictable and reluctant to short term shocks.
 
+- The factor exposure $\beta_{i,t}$ is asset-specific and assumed to be persistent or weekly dependent on t. But could be influenced by the regime change.
+Theoretically it is independent of other assets.
 
 ### [FactorVAE](https://ojs.aaai.org/index.php/AAAI/article/view/20369)
-
 
 
 

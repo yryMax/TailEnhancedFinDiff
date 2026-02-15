@@ -36,8 +36,10 @@ The final dataset has shape (491, 4278) (4278 days, 491 stocks).
 For Factor DM, we follow the default training/sampling setting: batch size 32, learning rate 1e-4, 600 epochs.
 cosine noise scheduler, 200 sampling step.
 
-![img.png](assets/img.png)
-<center> Training Loss (MSE)</center>
+<div style="text-align:center;">
+  <img src="assets/img.png" alt="Training Loss" style="max-width:50%; height:auto;">
+  <p>Training Loss (MSE)</p>
+</div>
 
 For stationary bootstrap, we set the block size = 8 (p = 0.125), we stop until we got [1257, 81], when
 sampling we randomly select 1 cross-section with replacement.
@@ -50,13 +52,10 @@ decided by following process.
 2. Slice it as [32, 64, 128, 256, 512, 1024, 2048, 4096]
 3. Choose the size that gives a stable mean of the distance to the training set.
 
-<div>
-  <img src="assets/convergence_experiment2.png" alt="converge_experiment2" style="max-width:49%; height:auto; object-fit:contain;">
-  <img src="assets/convergence_experiment.png" alt="convergence_experiment" style="max-width:49%; height:auto; object-fit:contain;">
-</div>
-<div style="text-align:center; margin-top:8px; min-height:2em;">
-  <span id="figure-name" style="display:inline-block; padding:4px 8px; border-top:1px solid #ddd;">
-Distance of all stocks(left) and largest variance stock(right) with the training set</span>
+<div style="text-align:center;">
+  <img src="assets/convergence_experiment2.png" alt="converge_experiment2" style="max-width:35%; height:auto; object-fit:contain;">
+  <img src="assets/convergence_experiment.png" alt="convergence_experiment" style="max-width:35%; height:auto; object-fit:contain;">
+  <p>Distance of all stocks(left) and largest variance stock(right) with the training set</p>
 </div>
 
 Based on the above results, we choose sample size = 2048 for both methods. This balances stability and efficiency
@@ -73,7 +72,9 @@ We evaluate the quality of generated scenarios by comparing their distribution s
 <center> Result on Distribution Comparing</center>
 
 
-![distribution.png](assets/distribution.png)
+<div style="text-align:center;">
+  <img src="assets/distribution.png" alt="Distribution Comparison" style="max-width:60%; height:auto;">
+</div>
 
 
 
@@ -85,8 +86,17 @@ The generated scenarios can be used for
 Risk Management(Stress Testing) or Portfolio Optimization.
 
 ### Risk Management
-We assume a fixed portfolio and evaluate the risk metrics of the portfolio under the generated scenarios, 
-the scenarios can be either cross-sectional or temporal. If we only care about the extreme scenarios it becomes a stress testing problem.
+We assume a fixed equal-weight portfolio ($w_i = 1/d$) and evaluate the risk metrics of the portfolio under the generated scenarios.
+For each method, we compute portfolio returns $r_p = X \cdot w$ from the generated scenarios,
+then calculate risk metrics directly from the portfolio return distribution.
+
+| Method | VaR₅% | ES₅% | Vol | MaxLoss |
+|---|---|---|---|---|
+| Historical (GT) | -0.0120 | -0.0168 | 0.0072 | -0.0385 |
+| FactorDM | -0.0114 | -0.0164 | 0.0066 | -0.0350 |
+| Stationary Bootstrap | -0.0109 | -0.0158 | 0.0070 | -0.0367 |
+
+<center> Risk Metrics under Equal-Weight Portfolio </center>
 
 
 
@@ -126,3 +136,21 @@ where $\text{VaR}_\alpha$ is the $\alpha$-quantile. We use $\alpha = 5\%$ and on
 $\gamma_2 = \mathbb{E}\left[\left(\frac{x - \mu}{\sigma}\right)^4\right] - 3$
 
 All marginal statistics are computed asset-wise and we record the relative value comparing to GT, their mean and std across all assets are reported.
+
+#### Risk Metrics
+
+Given a portfolio with weights $w \in \mathbb{R}^d$, the portfolio return under scenario $x$ is $r_p = w^\top x$.
+
+**VaR (Value at Risk)** is the $\alpha$-quantile of the portfolio return distribution. It represents the worst loss at confidence level $1-\alpha$.
+
+$$\text{VaR}_\alpha = \inf\{l : P(r_p \leq -l) \leq \alpha\}$$
+
+We use $\alpha = 5\%$ (left tail).
+
+**ES (Expected Shortfall / CVaR)** is the expected loss given that the loss exceeds VaR. It captures the average severity of tail losses.
+
+$$\text{ES}_\alpha = \mathbb{E}[r_p \mid r_p \leq \text{VaR}_\alpha]$$
+
+**Volatility (Vol)** is the standard deviation of portfolio returns $\sigma_{r_p} = \sqrt{\text{Var}(r_p)}$.
+
+**Max Loss** is the worst single-scenario portfolio return $\min_i r_{p,i}$.

@@ -86,9 +86,12 @@ The generated scenarios can be used for
 Risk Management(Stress Testing) or Portfolio Optimization.
 
 ### Risk Management
-We assume a fixed equal-weight portfolio ($w_i = 1/d$) and evaluate the risk metrics of the portfolio under the generated scenarios.
+We assume a fixed portfolio and evaluate the risk metrics of the portfolio under the generated scenarios.
 For each method, we compute portfolio returns $r_p = X \cdot w$ from the generated scenarios,
 then calculate risk metrics directly from the portfolio return distribution.
+We test two portfolio strategies:
+
+**Equal-Weight Portfolio** ($w_i = 1/d$):
 
 | Method | VaR₅% | ES₅% | Vol | MaxLoss |
 |---|---|---|---|---|
@@ -96,7 +99,15 @@ then calculate risk metrics directly from the portfolio return distribution.
 | FactorDM | -0.0114 | -0.0164 | 0.0066 | -0.0350 |
 | Stationary Bootstrap | -0.0109 | -0.0158 | 0.0070 | -0.0367 |
 
-<center> Risk Metrics under Equal-Weight Portfolio </center>
+**Minimum Variance Portfolio** ($\min_w w^\top \Sigma w$, s.t. $\sum w_i = 1, w_i \geq 0$, 20 non-zero weights):
+
+| Method | VaR₅% | ES₅% | Vol | MaxLoss |
+|---|---|---|---|---|
+| Historical (GT) | -0.0080 | -0.0120 | 0.0054 | -0.0349 |
+| FactorDM | -0.0072 | -0.0107 | 0.0047 | -0.0321 |
+| Stationary Bootstrap | -0.0074 | -0.0112 | 0.0052 | -0.0237 |
+
+<center> Risk Metrics under Two Portfolio Strategies </center>
 
 
 

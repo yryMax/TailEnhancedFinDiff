@@ -1,0 +1,40 @@
+import numpy as np
+from metrics.risk import registry
+from result import EvalResult, EvalResultCollection
+
+
+class RiskEvaluator:
+    """Evaluator for portfolio-level risk metrics."""
+
+    def __init__(self, weights: np.ndarray):
+        self.weights = weights
+        self.results = EvalResultCollection()
+
+    def add(self, scenarios: np.ndarray, name: str) -> 'RiskEvaluator':
+        r = scenarios @ self.weights
+        result = EvalResult(name=name, shape=scenarios.shape)
+        for metric_name, info in registry.get_all().items():
+            result.metrics[metric_name] = info['func'](r)
+        self.results.append(result)
+        return self
+
+    def report(self) -> EvalResultCollection:
+        return self.results
+
+
+if __name__ == "__main__":
+    training = np.load("data/stocknet_81.npy")
+    factor_dm = np.load("samples/factorDM2048.npy")
+    bootstrap = np.load("samples/SB2048.npy")
+
+    d = training.shape[1]
+    w = np.ones(d) / d
+
+    results = (RiskEvaluator(w)
+        .add(training, "Historical (GT)")
+        .add(factor_dm, "FactorDM")
+        .add(bootstrap, "Stationary Bootstrap")
+        .report())
+
+    results.to_console()
+    print(results.to_markdown())

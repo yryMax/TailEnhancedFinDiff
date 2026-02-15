@@ -107,8 +107,35 @@ We test two portfolio strategies:
 | FactorDM | -0.0072 | -0.0107 | 0.0047 | -0.0321 |
 | Stationary Bootstrap | -0.0074 | -0.0112 | 0.0052 | -0.0237 |
 
-<center> Risk Metrics under Two Portfolio Strategies </center>
+<center> Cross-Sectional Risk Metrics </center>
 
+#### Temporal Risk (Stationary Bootstrap only)
+
+Only for stationary bootstrap.
+
+**Equal-Weight Portfolio:**
+
+| Window | Method | VaR₅% | ES₅% | Vol | MaxLoss |
+|---|---|---|---|---|---|
+| T=5 | Historical (GT) | -0.0232 | -0.0348 | 0.0155 | -0.0962 |
+| T=5 | Stationary Bootstrap | -0.0239 | -0.0315 | 0.0154 | -0.0566 |
+| T=10 | Historical (GT) | -0.0285 | -0.0441 | 0.0207 | -0.0959 |
+| T=10 | Stationary Bootstrap | -0.0311 | -0.0410 | 0.0214 | -0.0723 |
+| T=20 | Historical (GT) | -0.0335 | -0.0529 | 0.0271 | -0.0905 |
+| T=20 | Stationary Bootstrap | -0.0431 | -0.0526 | 0.0293 | -0.0828 |
+
+**Minimum Variance Portfolio:**
+
+| Window | Method | VaR₅% | ES₅% | Vol | MaxLoss |
+|---|---|---|---|---|---|
+| T=5 | Historical (GT) | -0.0189 | -0.0258 | 0.0117 | -0.0652 |
+| T=5 | Stationary Bootstrap | -0.0172 | -0.0233 | 0.0119 | -0.0432 |
+| T=10 | Historical (GT) | -0.0239 | -0.0345 | 0.0165 | -0.0612 |
+| T=10 | Stationary Bootstrap | -0.0228 | -0.0313 | 0.0169 | -0.0536 |
+| T=20 | Historical (GT) | -0.0284 | -0.0387 | 0.0228 | -0.0600 |
+| T=20 | Stationary Bootstrap | -0.0320 | -0.0430 | 0.0238 | -0.0696 |
+
+<center> Temporal Risk Metrics </center>
 
 
 ### Portfolio Optimization

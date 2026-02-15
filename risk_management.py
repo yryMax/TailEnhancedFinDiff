@@ -23,6 +23,35 @@ class RiskEvaluator:
         return self.results
 
 
+class TemporalRiskEvaluator(RiskEvaluator):
+    """Evaluator for multi-day trajectory risk metrics."""
+
+    def __init__(self, weights: np.ndarray, window: int):
+        super().__init__(weights)
+        self.window = window
+
+    def add(self, trajectory: np.ndarray, name: str) -> 'TemporalRiskEvaluator':
+        r = rolling_cumulative_returns(trajectory, self.weights, self.window)
+        result = EvalResult(name=name, shape=trajectory.shape)
+        for metric_name, info in registry.get_all().items():
+            result.metrics[metric_name] = info['func'](r)
+        self.results.append(result)
+        return self
+
+
+def rolling_cumulative_returns(trajectory: np.ndarray, weights: np.ndarray, window: int) -> np.ndarray:
+    """Compute cumulative portfolio returns over rolling windows.
+    trajectory: [T, d], weights: [d] → [T-window+1,] cumulative returns.
+    """
+    r_p = trajectory @ weights
+    # vectorized: rolling product of (1 + r) then subtract 1
+    log_r = np.log1p(r_p)
+    cum_log = np.cumsum(log_r)
+    cum_log = np.insert(cum_log, 0, 0.0)
+    window_log = cum_log[window:] - cum_log[:-window]
+    return np.expm1(window_log)
+
+
 def minimum_variance_weights(cov: np.ndarray) -> np.ndarray:
     """Solve min w'Σw s.t. Σw_i=1, w_i>=0 (long-only)."""
     d = cov.shape[0]
@@ -58,12 +87,25 @@ if __name__ == "__main__":
     bootstrap = np.load("samples/SB2048.npy")
 
     d = training.shape[1]
-
-    # Equal-weight
-    w_eq = np.ones(d) / d
-    run_evaluation(training, factor_dm, bootstrap, w_eq)
-
-    # Minimum Variance
     cov = np.cov(training.T)
+
+    w_eq = np.ones(d) / d
     w_mv = minimum_variance_weights(cov)
-    run_evaluation(training, factor_dm, bootstrap, w_mv)
+    weights_list = [("Equal-Weight", w_eq), ("Minimum Variance", w_mv)]
+
+    # === Cross-Sectional ===
+    for w_name, w in weights_list:
+        run_evaluation(training, factor_dm, bootstrap, w)
+
+    # === Temporal (SB only) ===
+    sb_traj = np.load("samples/SB4096.npy")
+    windows = [5, 10, 20]
+
+    for w_name, w in weights_list:
+        for T in windows:
+            print(f"\n--- {w_name}, Window={T} ---")
+            results = (TemporalRiskEvaluator(w, T)
+                .add(training, "Historical (GT)")
+                .add(sb_traj, "Stationary Bootstrap")
+                .report())
+            print(results.to_markdown())

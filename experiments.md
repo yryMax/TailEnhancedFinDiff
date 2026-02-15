@@ -63,6 +63,8 @@ Based on the above results, we choose sample size = 2048 for both methods. This 
 
 ## Evaluation Results
 
+We evaluate the quality of generated scenarios by comparing their distribution similarity and marginal statistics with the training data. The results are summarized in the table below.
+
 | Method | MMD↓   | Cov↓ | ES↓ | Mean↓ | Std↓ | Skew↓ | Kurt↓ |
 |---|-------|---|---|---|---|---|---|
 | FactorDM | 0.0412 | 0.1943 | 0.0979±0.05 | -0.4953±3.00 | -0.1006±0.03 | -1.3566±3.26 | -0.3632±0.28 |
@@ -72,6 +74,29 @@ Based on the above results, we choose sample size = 2048 for both methods. This 
 
 
 ![distribution.png](assets/distribution.png)
+
+
+
+
+
+
+## Downstream Task
+The generated scenarios can be used for 
+Risk Management(Stress Testing) or Portfolio Optimization.
+
+### Risk Management
+We assume a fixed portfolio and evaluate the risk metrics of the portfolio under the generated scenarios, 
+the scenarios can be either cross-sectional or temporal. If we only care about the extreme scenarios it becomes a stress testing problem.
+
+
+
+### Portfolio Optimization
+We can use the generated scenarios to estimate the mean and covariance of asset returns, and then construct
+a mean-variance portfolio. For cross-sectional we only get 1 day output, we need temporal or dependence modeling to get multi-day output
+
+
+
+
 
 ### Appendix: Metrics
 

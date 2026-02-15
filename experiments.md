@@ -111,7 +111,7 @@ We test two portfolio strategies:
 
 #### Temporal Risk (Stationary Bootstrap only)
 
-Only for stationary bootstrap.
+Only for stationary bootstrap. we evaluate on the total project on T = [5, 10, 20] days.
 
 **Equal-Weight Portfolio:**
 
@@ -139,9 +139,17 @@ Only for stationary bootstrap.
 
 
 ### Portfolio Optimization
-We can use the generated scenarios to estimate the mean and covariance of asset returns, and then construct
-a mean-variance portfolio. For cross-sectional we only get 1 day output, we need temporal or dependence modeling to get multi-day output
+We use each method's generated scenarios to estimate $\mu$ and $\Sigma$, solve for the max-Sharpe portfolio
+($\max_w \frac{\mu^\top w}{\sqrt{w^\top \Sigma w}}$, s.t. $\sum w_i = 1, w_i \geq 0$),
+then evaluate the resulting portfolio on historical (GT) data.
 
+Efficient frontier is calculated by minimizing volatility while the target return is at least t for a range of t.
+t minimum is the return under minimum variance portfolio, and t maximum is the maximum return among all assets.
+
+<div style="text-align:center;">
+  <img src="assets/portfolio_optimization.png" alt="Portfolio Optimization" style="max-width:60%; height:auto;">
+  <p>Max-Sharpe portfolios evaluated on GT, with GT efficient frontier as reference</p>
+</div>
 
 
 

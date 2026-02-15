@@ -103,7 +103,6 @@ if __name__ == "__main__":
 
     for w_name, w in weights_list:
         for T in windows:
-            print(f"\n--- {w_name}, Window={T} ---")
             results = (TemporalRiskEvaluator(w, T)
                 .add(training, "Historical (GT)")
                 .add(sb_traj, "Stationary Bootstrap")

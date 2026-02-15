@@ -51,15 +51,16 @@ Hard guidance that substitute (part-of) the intermediate samples.
 
 #### Definition
 The first equation describes the expected excess return of an asset, while the second equation describes the realized excess return.
-$$\mathbb{E}[R_{i,t} - R_{f,t}] = \beta_{i,t}^\top \lambda_t$$
-$$R_{i,t} - R_{f,t} = \beta_{i,t}^\top f_t + \varepsilon_{i,t}$$
+$$\mathbb{E}[R_{i,t} - R_{f,t}] = \alpha_i + \beta_{i,t}^\top \lambda_t$$
+$$R_{i,t} - R_{f,t} = \alpha_i + \beta_{i,t}^\top f_t + \varepsilon_{i,t}$$
 where:
 - $R_{i,t}$: The return of asset $i$ at time $t$. 
 - $R_{f,t}$: The risk-free rate at time $t$.
+- $\alpha_i$: The abnormal or idiosyncratic expected return of asset $i$.
 - $\beta_{i,t} \in \mathbb{R}^{K}$: The factor exposures (or loadings) of asset $i$ to $K$ risk factors at time $t$.
-- $\lambda_t \in \mathbb{R}^{K}$: The factor risk premia at time $t$. This represents the expected excess return for a unit exposure to each risk factor.
-- $f_t \in \mathbb{R}^{K}$: The factor returns at time $t$. These are systematic, economy-wide risk factors that affect all assets to some degree. As a prior, these factors are assumed to be time-varying and capture the common movements in the market (e.g., market return, interest rate changes, volatility).
-- $\varepsilon_{i,t}$: The idiosyncratic return (or error term) for asset $i$ at time $t$. It represents the portion of the asset's return that is not explained by the common factors. It is assumed to be uncorrelated with the factors and have a mean of zero, i.e., $\mathbb{E}[\varepsilon_{i,t}] = 0$ and $\text{Cov}(\varepsilon_{i,t}, f_t) = 0$.
+- $\lambda_t \in \mathbb{R}^{K}$: The factor risk premia at time $t$. 
+- $f_t \in \mathbb{R}^{K}$: The factor returns at time $t$. 
+- $\varepsilon_{i,t}$: The idiosyncratic return (or error term) for asset $i$ at time $t$.
 
 #### The Prior
 There have been enough evidence that latent factors exists (means there is an interpolatable and continuous representation that expresses the correlation between assets), for example [IPCA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2983919) shows that under a structured conditional factor model where characteristics instrument time-varying loadings, the cross-section of returns admits an accurate low-rank representation.
@@ -71,7 +72,22 @@ There have been enough evidence that latent factors exists (means there is an in
 - The factor exposure $\beta_{i,t}$ is asset-specific and assumed to be persistent or weekly dependent on t. But could be influenced by the regime change.
 Theoretically it is independent of other assets.
 
-### [FactorVAE](https://ojs.aaai.org/index.php/AAAI/article/view/20369)
+- abnormal return $\alpha_i$ is supposed to be zero. A central goal of asset pricing is to test this null hypothesis.
+
+- The factor return $f_t$ is the realized outcome of a stochastic process, representing the "event" itself. It is treated as an observable input or regressor in the time-series pass of model estimation.
+
+- The factor risk premium $\lambda_t$ represents the unobservable "price" of risk. it is estimated from the cross-section of returns after the factor loadings are determined.
+Theoratically, it is unrelated to individual stocks and only related to market conditions.
+- $\varepsilon_{i,t}$ is assumed to be uncorrelated with the factors and have a mean of zero. Often parameterized by gaussian distribution.
 
 
+### Literature
+All the papers are about design choice of 1. assume some prior. 2. decide the condition. 3. decide the conditioning sampling strategy.
 
+| Model                                         | Condition                         | lambda_t             | alpha                   | beta_t                   | Sampling strategy  | Prior                                              |
+|-----------------------------------------------|-----------------------------------|----------------------|-------------------------|--------------------------|-------------------|----------------------------------------------------|
+| [FactorDM](https://arxiv.org/abs/2504.06566)  | None                              | extracted by U-net   | 0                       | orthogonal parameterized | Unconditional     | factor and factorloader should be separated        |
+| [FactorVAE](https://arxiv.org/abs/1802.05983) | temporal_f_t                      | VAE latent           | parameterized Gaussian  | extracted by GNU         | class-conditional | the factor asset pricing fomula                    |
+| [FactorDiff](https://arxiv.org/pdf/2509.22088)                                | Cross-sectional factor loader     | N/A                  | N/A                     | extracted MLP/Attention  | AdaLN             | IPCA is indicator of beta                          |
+
+Explainability by factor model: FactorVAE > FactorDM > FactorDiff

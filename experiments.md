@@ -77,7 +77,27 @@ We evaluate the quality of generated scenarios by comparing their distribution s
 </div>
 
 
+### Diversity and Novelty
 
+We further compare sample diversity and novelty between the two methods. 
+
+**Diversity** is measured by the pairwise Euclidean distance distribution within each sample set. 
+**Novelty** is measured by each generated sample's nearest-neighbour distance to the training set — larger distance indicates the sample is further from any observed data.
+
+<div style="text-align:center;">
+  <img src="fig1_data_and_pca.png" alt="Data and PCA Comparison" style="max-width:80%; height:auto;">
+  <p>Heatmap of generated returns sorted by mean return (left: FactorDM, middle: Stationary Bootstrap) and PCA projection fitted on real data (right)</p>
+</div>
+
+<div style="text-align:center;">
+  <img src="fig2_diversity_novelty.png" alt="Diversity and Novelty" style="max-width:70%; height:auto;">
+  <p>Pairwise distance distribution (left) and nearest-neighbour distance to real data (right)</p>
+</div>
+
+Stationary Bootstrap samples are exact resamples of the training set (NN distance = 0), 
+so its diversity simply reflects the original data distribution. 
+FactorDM generates genuinely novel scenarios (mean NN distance = 0.065) at the cost of  
+lower diversity and reduced tail coverage in PCA space.
 
 
 

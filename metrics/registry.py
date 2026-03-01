@@ -10,7 +10,7 @@ class MetricRegistry:
     def register(self, name: str, compare: bool = True):
         """
         Decorator to register a metric.
-        compare=True: metric needs both X and Y (e.g., MMD)
+        compare=True: metric needs both X and Y (e.g., W1)
         compare=False: metric only needs X (e.g., VaR)
         """
         def decorator(func: Callable):

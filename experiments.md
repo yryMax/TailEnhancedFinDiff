@@ -64,10 +64,10 @@ Based on the above results, we choose sample size = 2048 for both methods. This 
 
 We evaluate the quality of generated scenarios by comparing their distribution similarity and marginal statistics with the training data. The results are summarized in the table below.
 
-| Method | MMD↓   | Cov↓ | ES↓ | Mean↓ | Std↓ | Skew↓ | Kurt↓ |
+| Method | W1↓   | Cov↓ | ES↓ | Mean↓ | Std↓ | Skew↓ | Kurt↓ |
 |---|-------|---|---|---|---|---|---|
-| FactorDM | 0.0412 | 0.1943 | 0.0979±0.05 | -0.4953±3.00 | -0.1006±0.03 | -1.3566±3.26 | -0.3632±0.28 |
-| Stationary Bootstrap | 0.0000 | 0.0785 | 0.0257±0.04 | 0.3907±1.56 | -0.0082±0.03 | 2.2752±17.37 | -0.0423±0.23 |
+| FactorDM | 0.0011 | 0.1943 | 0.0979±0.05 | -0.4953±3.00 | -0.1006±0.03 | -1.3566±3.26 | -0.3632±0.28 |
+| Stationary Bootstrap | 0.0003 | 0.0785 | 0.0257±0.04 | 0.3907±1.56 | -0.0082±0.03 | 2.2752±17.37 | -0.0423±0.23 |
 
 <center> Result on Distribution Comparing</center>
 
@@ -178,11 +178,11 @@ t minimum is the return under minimum variance portfolio, and t maximum is the m
 
 #### Distribution Similarity
 
-**MMD (Maximum Mean Discrepancy)** measures the distance between two distributions using a Gaussian RBF kernel. Lower is better.
+**W1 (Sliced Wasserstein-1)** measures the distance between two distributions via random 1-D projections. Lower is better.
 
-$$\text{MMD}^2 = \frac{1}{n(n-1)}\sum_{i \neq j} k(x_i, x_j) + \frac{1}{m(m-1)}\sum_{i \neq j} k(y_i, y_j) - \frac{2}{nm}\sum_{i,j} k(x_i, y_j)$$
+$$\text{SW}_1(P, Q) = \mathbb{E}_{\theta \sim \mathcal{U}(S^{d-1})}\left[W_1(\theta_\sharp P,\, \theta_\sharp Q)\right]$$
 
-where $k(a, b) = \exp\left(-\frac{\|a - b\|^2}{2\sigma^2}\right)$, $\sigma$ is the median pairwise distance, $n$ is the number of generated samples, and $m$ is the number of training samples.
+where $W_1(u, v) = \int_{-\infty}^{\infty} |F_u(t) - F_v(t)|\, dt$ is the 1-D Wasserstein-1 (Earth Mover's) distance, $\theta_\sharp P$ denotes the pushforward of $P$ along direction $\theta$, and the expectation is approximated with 500 random unit vectors drawn uniformly from the $(d{-}1)$-sphere.
 
 **Cov Error (Covariance Error)** is the relative Frobenius norm error between covariance matrices:
 

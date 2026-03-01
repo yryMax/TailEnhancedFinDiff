@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import skew, kurtosis
+from scipy.stats import skew, kurtosis, wasserstein_distance
 from .registry import MetricRegistry
 
 registry = MetricRegistry()
@@ -25,25 +25,17 @@ def _compute_es_per_asset(data: np.ndarray, alpha: float = 0.05) -> np.ndarray:
 
 # ============== Registered Metrics ==============
 
-@registry.register('MMD')
-def compute_mmd(X: np.ndarray, Y: np.ndarray, sigma: float = None) -> float:
-    """Compute MMD between two distributions."""
+@registry.register('W1')
+def compute_wasserstein1(X: np.ndarray, Y: np.ndarray, n_projections: int = 500, seed: int = 42) -> float:
+    """Sliced Wasserstein-1 distance between two multivariate distributions."""
     X, Y = X.astype(np.float64), Y.astype(np.float64)
-    if sigma is None:
-        XY = np.vstack([X[:1000], Y[:1000]])
-        dists = np.sqrt(((XY[:, None] - XY[None, :]) ** 2).sum(-1))
-        sigma = np.median(dists[dists > 0]) + 1e-10
-
-    def rbf(A, B):
-        AA, BB = (A ** 2).sum(1, keepdims=True), (B ** 2).sum(1, keepdims=True)
-        return np.exp(-(AA + BB.T - 2 * A @ B.T) / (2 * sigma ** 2))
-
-    K_XX, K_YY, K_XY = rbf(X, X), rbf(Y, Y), rbf(X, Y)
-    n, m = len(X), len(Y)
-    mmd_sq = (K_XX.sum() - np.trace(K_XX)) / (n * (n - 1)) + \
-             (K_YY.sum() - np.trace(K_YY)) / (m * (m - 1)) - \
-             2 * K_XY.sum() / (n * m)
-    return np.sqrt(max(0, mmd_sq))
+    rng = np.random.default_rng(seed)
+    d = X.shape[1]
+    directions = rng.standard_normal((n_projections, d))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    X_proj = X @ directions.T  # [n, n_projections]
+    Y_proj = Y @ directions.T  # [m, n_projections]
+    return float(np.mean([wasserstein_distance(X_proj[:, i], Y_proj[:, i]) for i in range(n_projections)]))
 
 
 @registry.register('Cov')

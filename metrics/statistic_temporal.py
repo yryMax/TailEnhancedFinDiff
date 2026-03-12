@@ -34,7 +34,7 @@ def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
     X_pool, Y_pool = _pool(X), _pool(Y)
     corr_X = np.corrcoef(X_pool.T)
     corr_Y = np.corrcoef(Y_pool.T)
-    return float(np.linalg.norm(corr_X - corr_Y, 'fro') / (np.linalg.norm(corr_Y, 'fro') + 1e-10))
+    return float(np.linalg.norm(corr_X - corr_Y, 'fro') / np.linalg.norm(corr_Y, 'fro'))
 
 
 @registry.register('ES')
@@ -52,7 +52,7 @@ def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
 
     es_X = np.array([_es(cum_X, n) for n in range(N)])
     es_Y = np.array([_es(cum_Y, n) for n in range(N)])
-    relative = (es_X - es_Y) / (np.abs(es_Y) + 1e-10)
+    relative = (es_X - es_Y) / (np.abs(es_Y))
     return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
 
 
@@ -61,7 +61,7 @@ def compute_mean(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative mean error per asset. Pool [M, N, D] → [M*D, N]."""
     X_pool, Y_pool = _pool(X), _pool(Y)
     mean_X, mean_Y = np.mean(X_pool, axis=0), np.mean(Y_pool, axis=0)
-    relative = (mean_X - mean_Y) / (np.abs(mean_Y) + 1e-10)
+    relative = (mean_X - mean_Y) / (np.abs(mean_Y))
     return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
 
 
@@ -70,7 +70,7 @@ def compute_std(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative std error per asset. Pool [M, N, D] → [M*D, N]."""
     X_pool, Y_pool = _pool(X), _pool(Y)
     std_X, std_Y = np.std(X_pool, axis=0), np.std(Y_pool, axis=0)
-    relative = (std_X - std_Y) / (np.abs(std_Y) + 1e-10)
+    relative = (std_X - std_Y) / (np.abs(std_Y))
     return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
 
 
@@ -79,7 +79,7 @@ def compute_skew(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative skew error per asset. Pool [M, N, D] → [M*D, N]."""
     X_pool, Y_pool = _pool(X), _pool(Y)
     skew_X, skew_Y = skew(X_pool, axis=0), skew(Y_pool, axis=0)
-    relative = (skew_X - skew_Y) / (np.abs(skew_Y) + 1e-10)
+    relative = (skew_X - skew_Y) / (np.abs(skew_Y))
     return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
 
 
@@ -88,7 +88,7 @@ def compute_kurt(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative kurt error per asset. Pool [M, N, D] → [M*D, N]."""
     X_pool, Y_pool = _pool(X), _pool(Y)
     kurt_X, kurt_Y = kurtosis(X_pool, axis=0), kurtosis(Y_pool, axis=0)
-    relative = (kurt_X - kurt_Y) / (np.abs(kurt_Y) + 1e-10)
+    relative = (kurt_X - kurt_Y) / (np.abs(kurt_Y))
     return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
 
 
@@ -101,7 +101,7 @@ def _acf_mean(X: np.ndarray, nlags: int) -> float:
     acf_vals = []
     for k in range(1, nlags + 1):
         cov_k = (X_c[:, :, k:] * X_c[:, :, :-k]).mean(axis=2)  # [M, N]
-        acf_vals.append((cov_k / (var + 1e-10)).mean())
+        acf_vals.append((cov_k / (var)).mean())
     return float(np.mean(acf_vals))
 
 
@@ -146,7 +146,7 @@ def _coarse_fine_mean(X: np.ndarray, tau: int, k_max: int) -> float:
 # ============== Temporal Stylized Facts (difference vs reference) ==============
 
 def _rel(gen: float, ref: float) -> float:
-    return (gen - ref) / (abs(ref) + 1e-10)
+    return (gen - ref) / (abs(ref))
 
 
 @registry.register('LinUnpred')

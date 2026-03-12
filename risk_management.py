@@ -13,9 +13,9 @@ class RiskEvaluator:
 
     def add(self, scenarios: np.ndarray, name: str) -> 'RiskEvaluator':
         r = scenarios @ self.weights
-        result = EvalResult(name=name, shape=scenarios.shape)
-        for metric_name, info in registry.get_all().items():
-            result.metrics[metric_name] = info['func'](r)
+        result = EvalResult(name=name)
+        for metric_name, func in registry.get_all().items():
+            result.metrics[metric_name] = func(r)
         self.results.append(result)
         return self
 
@@ -32,9 +32,9 @@ class TemporalRiskEvaluator(RiskEvaluator):
 
     def add(self, trajectory: np.ndarray, name: str) -> 'TemporalRiskEvaluator':
         r = rolling_cumulative_returns(trajectory, self.weights, self.window)
-        result = EvalResult(name=name, shape=trajectory.shape)
-        for metric_name, info in registry.get_all().items():
-            result.metrics[metric_name] = info['func'](r)
+        result = EvalResult(name=name)
+        for metric_name, func in registry.get_all().items():
+            result.metrics[metric_name] = func(r)
         self.results.append(result)
         return self
 

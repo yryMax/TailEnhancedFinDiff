@@ -9,11 +9,10 @@ from dataclasses import dataclass, field
 class EvalResult:
     """Single evaluation result for one generated dataset."""
     name: str
-    shape: tuple
     metrics: Dict[str, Any] = field(default_factory=dict)
     data: np.ndarray = None  # Raw data for plotting
 
-    def _format_value(self, key: str, value: Any) -> str:
+    def _format_value(self, value: Any) -> str:
         if isinstance(value, dict) and 'mean' in value:
             return f"{value['mean']:.2f}±{value['std']:.2f}"
         elif isinstance(value, float):
@@ -21,7 +20,7 @@ class EvalResult:
         return str(value)
 
     def to_dict(self) -> Dict[str, str]:
-        return {k: self._format_value(k, v) for k, v in self.metrics.items()}
+        return {k: self._format_value(v) for k, v in self.metrics.items()}
 
 
 @dataclass
@@ -57,8 +56,6 @@ class EvalResultCollection:
             metric_names = list(self.results[0].metrics.keys()) if self.results else []
 
         print(f"Training: {self.training_shape}")
-        for r in self.results:
-            print(f"{r.name}: {r.shape}")
         print("=" * 70)
 
         # Header

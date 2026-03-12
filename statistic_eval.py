@@ -6,10 +6,11 @@ from result import EvalResult, EvalResultCollection
 class Evaluator:
     """Evaluator for distribution similarity and marginal statistics."""
 
-    def __init__(self, Y: np.ndarray):
+    def __init__(self, Y: np.ndarray, metrics: list = None):
         if Y.ndim != 2:
             raise ValueError(f"Training data must be 2D [samples, assets]. Got {Y.ndim}D")
         self.Y = Y
+        self.metrics = metrics
         self.results = EvalResultCollection(training_shape=Y.shape, training_data=Y)
 
     def add(self, X: np.ndarray, name: str) -> 'Evaluator':
@@ -18,9 +19,12 @@ class Evaluator:
         if X.shape[1] != self.Y.shape[1]:
             raise ValueError(f"Asset dimension mismatch: X has {X.shape[1]}, Y has {self.Y.shape[1]}")
 
-        result = EvalResult(name=name, shape=X.shape, data=X)
-        for metric_name, info in registry.get_all().items():
-            result.metrics[metric_name] = info['func'](X, self.Y)
+        all_metrics = registry.get_all()
+        selected = {k: v for k, v in all_metrics.items() if self.metrics is None or k in self.metrics}
+
+        result = EvalResult(name=name, data=X)
+        for metric_name, func in selected.items():
+            result.metrics[metric_name] = func(X, self.Y)
 
         self.results.append(result)
         return self
@@ -30,12 +34,12 @@ class Evaluator:
 
 
 if __name__ == "__main__":
-    training = np.load("data/stocknet_81.npy")
-    factor_dm = np.load("samples/factorDM2048.npy")
-    bootstrap = np.load("samples/SB2048.npy")
+    training = np.load("data/ROBECO.npy")
+    psm = np.load("data/PSM2048.npy")
+    bootstrap = np.load("data/SB2048.npy")
 
     results = (Evaluator(training)
-        .add(factor_dm, "FactorDM")
+        .add(psm, "parametric simulation model")
         .add(bootstrap, "Stationary Bootstrap")
         .report())
 

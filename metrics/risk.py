@@ -5,21 +5,21 @@ from .statistic import var, es
 registry = MetricRegistry()
 
 
-@registry.register('VaR_5%', compare=False)
+@registry.register('VaR_5%')
 def compute_var(r: np.ndarray) -> float:
     return var(r, 0.05)
 
 
-@registry.register('ES_5%', compare=False)
+@registry.register('ES_5%')
 def compute_es_portfolio(r: np.ndarray) -> float:
     return es(r, 0.05)
 
 
-@registry.register('Vol', compare=False)
+@registry.register('Vol')
 def compute_vol(r: np.ndarray) -> float:
     return float(np.std(r))
 
 
-@registry.register('MaxLoss', compare=False)
+@registry.register('MaxLoss')
 def compute_max_loss(r: np.ndarray) -> float:
     return float(np.min(r))

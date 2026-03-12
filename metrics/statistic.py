@@ -18,9 +18,23 @@ def es(returns: np.ndarray, alpha: float = 0.05) -> float:
     return float(np.mean(returns[returns <= v]))
 
 
+def _valid_mask(Y: np.ndarray, min_samples: int = 30) -> np.ndarray:
+    """Returns bool mask of assets with >= min_samples valid (non-NaN) rows."""
+    return np.sum(~np.isnan(Y), axis=0) >= min_samples
+
+
+def _agg(relative: np.ndarray) -> dict:
+    """Aggregate per-asset relative errors, ignoring NaN and inf."""
+    finite = relative[np.isfinite(relative)]
+    return {'mean': float(np.mean(finite)), 'std': float(np.std(finite))}
+
+
 def _compute_es_per_asset(data: np.ndarray, alpha: float = 0.05) -> np.ndarray:
-    """Helper: compute ES for each asset."""
-    return np.array([es(data[:, i], alpha) for i in range(data.shape[1])])
+    """Helper: compute ES for each asset, ignoring NaN."""
+    def _es_nan(col):
+        col = col[~np.isnan(col)]
+        return es(col, alpha) if len(col) > 0 else np.nan
+    return np.array([_es_nan(data[:, i]) for i in range(data.shape[1])])
 
 
 # ============== Registered Metrics ==============
@@ -44,44 +58,47 @@ def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
     cov_X, cov_Y = np.cov(X.T), np.cov(Y.T)
     if cov_X.ndim == 0:
         cov_X, cov_Y = np.array([[cov_X]]), np.array([[cov_Y]])
-    return np.linalg.norm(cov_X - cov_Y, 'fro') / (np.linalg.norm(cov_Y, 'fro') + 1e-10)
+    return np.linalg.norm(cov_X - cov_Y, 'fro') / (np.linalg.norm(cov_Y, 'fro'))
 
 
 @registry.register('ES')
 def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
     """Relative ES error: (X - Y) / Y per asset."""
-    es_X, es_Y = _compute_es_per_asset(X, alpha), _compute_es_per_asset(Y, alpha)
-    relative = (es_X - es_Y) / (np.abs(es_Y) + 1e-10)
-    return {'mean': np.mean(relative), 'std': np.std(relative)}
+    mask = _valid_mask(Y)
+    es_X, es_Y = _compute_es_per_asset(X[:, mask], alpha), _compute_es_per_asset(Y[:, mask], alpha)
+    return _agg((es_X - es_Y) / np.abs(es_Y))
 
 
 @registry.register('Mean')
 def compute_mean(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative mean error: (X - Y) / Y per asset."""
-    mean_X, mean_Y = np.mean(X, axis=0), np.mean(Y, axis=0)
-    relative = (mean_X - mean_Y) / (np.abs(mean_Y) + 1e-10)
-    return {'mean': np.mean(relative), 'std': np.std(relative)}
+    mask = _valid_mask(Y)
+    X, Y = X[:, mask], Y[:, mask]
+    return _agg((np.nanmean(X, axis=0) - np.nanmean(Y, axis=0)) / np.abs(np.nanmean(Y, axis=0)))
 
 
 @registry.register('Std')
 def compute_std(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative std error: (X - Y) / Y per asset."""
-    std_X, std_Y = np.std(X, axis=0), np.std(Y, axis=0)
-    relative = (std_X - std_Y) / (np.abs(std_Y) + 1e-10)
-    return {'mean': np.mean(relative), 'std': np.std(relative)}
+    mask = _valid_mask(Y)
+    X, Y = X[:, mask], Y[:, mask]
+    std_X, std_Y = np.nanstd(X, axis=0), np.nanstd(Y, axis=0)
+    return _agg((std_X - std_Y) / std_Y)
 
 
 @registry.register('Skew')
 def compute_skew(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative skew error: (X - Y) / Y per asset."""
-    skew_X, skew_Y = skew(X, axis=0), skew(Y, axis=0)
-    relative = (skew_X - skew_Y) / (np.abs(skew_Y) + 1e-10)
-    return {'mean': np.mean(relative), 'std': np.std(relative)}
+    mask = _valid_mask(Y)
+    X, Y = X[:, mask], Y[:, mask]
+    skew_X, skew_Y = skew(X, axis=0, nan_policy='omit'), skew(Y, axis=0, nan_policy='omit')
+    return _agg((skew_X - skew_Y) / np.abs(skew_Y))
 
 
 @registry.register('Kurt')
 def compute_kurt(X: np.ndarray, Y: np.ndarray) -> dict:
     """Relative kurt error: (X - Y) / Y per asset."""
-    kurt_X, kurt_Y = kurtosis(X, axis=0), kurtosis(Y, axis=0)
-    relative = (kurt_X - kurt_Y) / (np.abs(kurt_Y) + 1e-10)
-    return {'mean': np.mean(relative), 'std': np.std(relative)}
+    mask = _valid_mask(Y)
+    X, Y = X[:, mask], Y[:, mask]
+    kurt_X, kurt_Y = kurtosis(X, axis=0, nan_policy='omit'), kurtosis(Y, axis=0, nan_policy='omit')
+    return _agg((kurt_X - kurt_Y) / np.abs(kurt_Y))

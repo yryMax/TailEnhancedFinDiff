@@ -6,10 +6,11 @@ from result import EvalResult, EvalResultCollection
 class TemporalEvaluator:
     """Evaluator for temporal scenario data [M, N, D]."""
 
-    def __init__(self, Y: np.ndarray):
+    def __init__(self, Y: np.ndarray, metrics: list = None):
         if Y.ndim != 3:
             raise ValueError(f"Training data must be 3D [windows, assets, days]. Got {Y.ndim}D")
         self.Y = Y
+        self.metrics = metrics
         self.results = EvalResultCollection(training_shape=Y.shape)
 
     def add(self, X: np.ndarray, name: str) -> 'TemporalEvaluator':
@@ -20,9 +21,12 @@ class TemporalEvaluator:
         if X.shape[2] != self.Y.shape[2]:
             raise ValueError(f"Day dimension mismatch: X has {X.shape[2]}, Y has {self.Y.shape[2]}")
 
-        result = EvalResult(name=name, shape=X.shape)
-        for metric_name, info in registry.get_all().items():
-            result.metrics[metric_name] = info['func'](X, self.Y)
+        all_metrics = registry.get_all()
+        selected = {k: v for k, v in all_metrics.items() if self.metrics is None or k in self.metrics}
+
+        result = EvalResult(name=name)
+        for metric_name, func in selected.items():
+            result.metrics[metric_name] = func(X, self.Y)
 
         self.results.append(result)
         return self

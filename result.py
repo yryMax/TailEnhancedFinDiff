@@ -28,6 +28,7 @@ class EvalResultCollection:
     """Collection of evaluation results for multiple generated datasets."""
     training_shape: tuple = None
     training_data: np.ndarray = None
+    gt_result: EvalResult = None
     results: List[EvalResult] = field(default_factory=list)
 
     def append(self, result: EvalResult):
@@ -37,7 +38,9 @@ class EvalResultCollection:
         if isinstance(value, dict) and 'mean' in value:
             return f"{value['mean']:.{mean_prec}f}±{value['std']:.{std_prec}f}"
         elif isinstance(value, (int, float, np.floating)):
-            return f"{float(value):.{mean_prec}f}"
+            v = float(value)
+            prec = mean_prec if abs(v) >= 0.01 or v == 0.0 else max(mean_prec, -int(np.floor(np.log10(abs(v)))) + 2)
+            return f"{v:.{prec}f}"
         return str(value)
 
     def _select_assets(self) -> Dict[str, int]:
@@ -52,24 +55,23 @@ class EvalResultCollection:
 
     def to_console(self, metric_names: List[str] = None):
         """Print results to console."""
+        all_results = ([self.gt_result] if self.gt_result else []) + self.results
         if metric_names is None:
-            metric_names = list(self.results[0].metrics.keys()) if self.results else []
+            metric_names = list(all_results[0].metrics.keys()) if all_results else []
 
         print(f"Training: {self.training_shape}")
         print("=" * 70)
 
-        # Header
-        header = ["Metric"] + [r.name for r in self.results]
-        col_width = max(20, max(len(r.name) for r in self.results) + 2)
+        col_width = max(20, max(len(r.name) for r in all_results) + 2)
         print(f"{'Metric':<10}", end="")
-        for r in self.results:
+        for r in all_results:
             print(f"{r.name:>{col_width}}", end="")
         print()
-        print("-" * (10 + col_width * len(self.results)))
+        print("-" * (10 + col_width * len(all_results)))
 
         for metric_name in metric_names:
             print(f"{metric_name:<10}", end="")
-            for r in self.results:
+            for r in all_results:
                 if metric_name in r.metrics:
                     print(f"{self._format_value(r.metrics[metric_name]):>{col_width}}", end="")
                 else:
@@ -78,15 +80,16 @@ class EvalResultCollection:
 
     def to_markdown(self, metric_names: List[str] = None) -> str:
         """Generate markdown table (rows=methods, cols=metrics)."""
+        all_results = ([self.gt_result] if self.gt_result else []) + self.results
         if metric_names is None:
-            metric_names = list(self.results[0].metrics.keys()) if self.results else []
+            metric_names = list(all_results[0].metrics.keys()) if all_results else []
 
         lines = []
         header = ["Method"] + metric_names
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "|".join(["---"] * len(header)) + "|")
 
-        for r in self.results:
+        for r in all_results:
             row = [r.name]
             for metric_name in metric_names:
                 if metric_name in r.metrics:

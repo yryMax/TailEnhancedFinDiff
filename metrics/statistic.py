@@ -18,7 +18,7 @@ def es(returns: np.ndarray, alpha: float = 0.05) -> float:
     return float(np.mean(returns[returns <= v]))
 
 
-def _valid_mask(Y: np.ndarray, min_samples: int = 30) -> np.ndarray:
+def _valid_mask(Y: np.ndarray, min_samples: int = 100) -> np.ndarray:
     """Returns bool mask of assets with >= min_samples valid (non-NaN) rows."""
     return np.sum(~np.isnan(Y), axis=0) >= min_samples
 
@@ -27,6 +27,18 @@ def _agg(relative: np.ndarray) -> dict:
     """Aggregate per-asset relative errors, ignoring NaN and inf."""
     finite = relative[np.isfinite(relative)]
     return {'mean': float(np.mean(finite)), 'std': float(np.std(finite))}
+
+
+def _nancovariance(X: np.ndarray) -> np.ndarray:
+    """Pairwise complete observations covariance matrix for data with NaN.
+    For each (i,j) pair, uses only rows where both assets are non-NaN.
+    """
+    means = np.nanmean(X, axis=0)
+    Xc = np.where(~np.isnan(X), X - means, 0.0)
+    mask = (~np.isnan(X)).astype(np.float64)
+    cov_sum = Xc.T @ Xc           # [p, p]
+    count = mask.T @ mask          # [p, p]: number of valid pairs per (i,j)
+    return cov_sum / np.maximum(count - 1, 1)
 
 
 def _compute_es_per_asset(data: np.ndarray, alpha: float = 0.05) -> np.ndarray:
@@ -40,65 +52,71 @@ def _compute_es_per_asset(data: np.ndarray, alpha: float = 0.05) -> np.ndarray:
 # ============== Registered Metrics ==============
 
 @registry.register('W1')
-def compute_wasserstein1(X: np.ndarray, Y: np.ndarray, n_projections: int = 500, seed: int = 42) -> float:
-    """Sliced Wasserstein-1 distance between two multivariate distributions."""
-    X, Y = X.astype(np.float64), Y.astype(np.float64)
-    rng = np.random.default_rng(seed)
-    d = X.shape[1]
-    directions = rng.standard_normal((n_projections, d))
-    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
-    X_proj = X @ directions.T  # [n, n_projections]
-    Y_proj = Y @ directions.T  # [m, n_projections]
-    return float(np.mean([wasserstein_distance(X_proj[:, i], Y_proj[:, i]) for i in range(n_projections)]))
+def compute_wasserstein1(X: np.ndarray, Y: np.ndarray) -> float:
+    """Per-asset marginal Wasserstein-1 distance, averaged across valid assets.
+    For each asset, uses rows where both X and Y are non-NaN.
+    """
+    mask = _valid_mask(Y)
+    X_v, Y_v = X[:, mask].astype(np.float64), Y[:, mask].astype(np.float64)
+    n_assets = X_v.shape[1]
+    distances = []
+    for j in range(n_assets):
+        x_col = X_v[:, j][~np.isnan(X_v[:, j])]
+        y_col = Y_v[:, j][~np.isnan(Y_v[:, j])]
+        if len(x_col) >= 2 and len(y_col) >= 2:
+            distances.append(wasserstein_distance(x_col, y_col))
+    return float(np.mean(distances)) if distances else np.nan
 
 
 @registry.register('Cov')
 def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
-    """Relative Frobenius norm error between covariance matrices."""
-    cov_X, cov_Y = np.cov(X.T), np.cov(Y.T)
-    if cov_X.ndim == 0:
-        cov_X, cov_Y = np.array([[cov_X]]), np.array([[cov_Y]])
-    return np.linalg.norm(cov_X - cov_Y, 'fro') / (np.linalg.norm(cov_Y, 'fro'))
+    """Relative Frobenius norm error between covariance matrices.
+    Uses pairwise complete observations for Y to handle NaN.
+    X is subsetted to the same valid assets as Y.
+    """
+    mask = _valid_mask(Y)
+    X_v, Y_v = X[:, mask], Y[:, mask]
+    cov_X = _nancovariance(X_v)
+    cov_Y = _nancovariance(Y_v)
+    return float(np.linalg.norm(cov_X - cov_Y, 'fro') / np.linalg.norm(cov_Y, 'fro'))
 
 
 @registry.register('ES')
 def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
-    """Relative ES error: (X - Y) / Y per asset."""
+    """ES per asset (5th percentile tail mean), mean±std across assets."""
     mask = _valid_mask(Y)
-    es_X, es_Y = _compute_es_per_asset(X[:, mask], alpha), _compute_es_per_asset(Y[:, mask], alpha)
-    return _agg((es_X - es_Y) / np.abs(es_Y))
+    es_vals = _compute_es_per_asset(X[:, mask], alpha)
+    finite = es_vals[np.isfinite(es_vals)]
+    return {'mean': float(np.mean(finite)), 'std': float(np.std(finite))}
 
 
 @registry.register('Mean')
 def compute_mean(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative mean error: (X - Y) / Y per asset."""
+    """Mean per asset, mean±std across assets."""
     mask = _valid_mask(Y)
-    X, Y = X[:, mask], Y[:, mask]
-    return _agg((np.nanmean(X, axis=0) - np.nanmean(Y, axis=0)) / np.abs(np.nanmean(Y, axis=0)))
+    vals = np.nanmean(X[:, mask], axis=0)
+    return {'mean': float(np.nanmean(vals)), 'std': float(np.nanstd(vals))}
 
 
 @registry.register('Std')
 def compute_std(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative std error: (X - Y) / Y per asset."""
+    """Std per asset, mean±std across assets."""
     mask = _valid_mask(Y)
-    X, Y = X[:, mask], Y[:, mask]
-    std_X, std_Y = np.nanstd(X, axis=0), np.nanstd(Y, axis=0)
-    return _agg((std_X - std_Y) / std_Y)
+    vals = np.nanstd(X[:, mask], axis=0)
+    return {'mean': float(np.nanmean(vals)), 'std': float(np.nanstd(vals))}
 
 
 @registry.register('Skew')
 def compute_skew(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative skew error: (X - Y) / Y per asset."""
+    """Skew per asset, mean±std across assets."""
     mask = _valid_mask(Y)
-    X, Y = X[:, mask], Y[:, mask]
-    skew_X, skew_Y = skew(X, axis=0, nan_policy='omit'), skew(Y, axis=0, nan_policy='omit')
-    return _agg((skew_X - skew_Y) / np.abs(skew_Y))
+    vals = skew(X[:, mask], axis=0, nan_policy='omit')
+    return {'mean': float(np.nanmean(vals)), 'std': float(np.nanstd(vals))}
 
 
 @registry.register('Kurt')
 def compute_kurt(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative kurt error: (X - Y) / Y per asset."""
+    """Kurt per asset, mean±std across assets."""
     mask = _valid_mask(Y)
-    X, Y = X[:, mask], Y[:, mask]
-    kurt_X, kurt_Y = kurtosis(X, axis=0, nan_policy='omit'), kurtosis(Y, axis=0, nan_policy='omit')
-    return _agg((kurt_X - kurt_Y) / np.abs(kurt_Y))
+    vals = kurtosis(X[:, mask], axis=0, nan_policy='omit')
+    return {'mean': float(np.nanmean(vals)), 'std': float(np.nanstd(vals))}

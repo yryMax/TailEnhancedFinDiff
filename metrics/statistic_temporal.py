@@ -39,10 +39,8 @@ def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
 
 @registry.register('ES')
 def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
-    """Relative D-day cumulative ES error per asset.
-    Sums returns over D days → [M, N], then computes ES on the tail.
-    """
-    cum_X, cum_Y = _cumsum(X), _cumsum(Y)
+    """D-day cumulative ES per asset, mean±std across assets."""
+    cum_X = _cumsum(X)
     N = X.shape[1]
 
     def _es(data, n):
@@ -51,45 +49,35 @@ def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
         return float(np.mean(col[col <= threshold]))
 
     es_X = np.array([_es(cum_X, n) for n in range(N)])
-    es_Y = np.array([_es(cum_Y, n) for n in range(N)])
-    relative = (es_X - es_Y) / (np.abs(es_Y))
-    return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
+    return {'mean': float(np.mean(es_X)), 'std': float(np.std(es_X))}
 
 
 @registry.register('Mean')
 def compute_mean(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative mean error per asset. Pool [M, N, D] → [M*D, N]."""
-    X_pool, Y_pool = _pool(X), _pool(Y)
-    mean_X, mean_Y = np.mean(X_pool, axis=0), np.mean(Y_pool, axis=0)
-    relative = (mean_X - mean_Y) / (np.abs(mean_Y))
-    return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
+    """Mean per asset, mean±std across assets. Pool [M, N, D] → [M*D, N]."""
+    vals = np.mean(_pool(X), axis=0)
+    return {'mean': float(np.mean(vals)), 'std': float(np.std(vals))}
 
 
 @registry.register('Std')
 def compute_std(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative std error per asset. Pool [M, N, D] → [M*D, N]."""
-    X_pool, Y_pool = _pool(X), _pool(Y)
-    std_X, std_Y = np.std(X_pool, axis=0), np.std(Y_pool, axis=0)
-    relative = (std_X - std_Y) / (np.abs(std_Y))
-    return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
+    """Std per asset, mean±std across assets. Pool [M, N, D] → [M*D, N]."""
+    vals = np.std(_pool(X), axis=0)
+    return {'mean': float(np.mean(vals)), 'std': float(np.std(vals))}
 
 
 @registry.register('Skew')
 def compute_skew(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative skew error per asset. Pool [M, N, D] → [M*D, N]."""
-    X_pool, Y_pool = _pool(X), _pool(Y)
-    skew_X, skew_Y = skew(X_pool, axis=0), skew(Y_pool, axis=0)
-    relative = (skew_X - skew_Y) / (np.abs(skew_Y))
-    return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
+    """Skew per asset, mean±std across assets. Pool [M, N, D] → [M*D, N]."""
+    vals = skew(_pool(X), axis=0)
+    return {'mean': float(np.mean(vals)), 'std': float(np.std(vals))}
 
 
 @registry.register('Kurt')
 def compute_kurt(X: np.ndarray, Y: np.ndarray) -> dict:
-    """Relative kurt error per asset. Pool [M, N, D] → [M*D, N]."""
-    X_pool, Y_pool = _pool(X), _pool(Y)
-    kurt_X, kurt_Y = kurtosis(X_pool, axis=0), kurtosis(Y_pool, axis=0)
-    relative = (kurt_X - kurt_Y) / (np.abs(kurt_Y))
-    return {'mean': float(np.mean(relative)), 'std': float(np.std(relative))}
+    """Kurt per asset, mean±std across assets. Pool [M, N, D] → [M*D, N]."""
+    vals = kurtosis(_pool(X), axis=0)
+    return {'mean': float(np.mean(vals)), 'std': float(np.std(vals))}
 
 
 # ============== Temporal Stylized Fact Helpers ==============
@@ -151,31 +139,23 @@ def _rel(gen: float, ref: float) -> float:
 
 @registry.register('LinUnpred')
 def compute_lin_unpred(X: np.ndarray, Y: np.ndarray, nlags: int = 10) -> float:
-    """Linear unpredictability: mean ACF of returns (lags 1-10).
-    Reported as (generated - reference) / |reference|. Closer to 0 is better.
-    """
-    return _rel(_acf_mean(X, nlags), _acf_mean(Y, nlags))
+    """Linear unpredictability: mean ACF of returns (lags 1-10)."""
+    return _acf_mean(X, nlags)
 
 
 @registry.register('VolClust')
 def compute_vol_clust(X: np.ndarray, Y: np.ndarray, nlags: int = 10) -> float:
-    """Volatility clustering: mean ACF of |returns| (lags 1-10).
-    Reported as (generated - reference) / |reference|. Closer to 0 is better.
-    """
-    return _rel(_acf_mean(np.abs(X), nlags), _acf_mean(np.abs(Y), nlags))
+    """Volatility clustering: mean ACF of |returns| (lags 1-10)."""
+    return _acf_mean(np.abs(X), nlags)
 
 
 @registry.register('CoarseFine')
 def compute_coarse_fine(X: np.ndarray, Y: np.ndarray, tau: int = 5, k_max: int = 10) -> float:
-    """Coarse-fine volatility: corr(coarse_vol[t+k], fine_vol[t]), tau=5, lags 1-10.
-    Reported as (generated - reference) / |reference|. Closer to 0 is better.
-    """
-    return _rel(_coarse_fine_mean(X, tau, k_max), _coarse_fine_mean(Y, tau, k_max))
+    """Coarse-fine volatility: corr(coarse_vol[t+k], fine_vol[t]), tau=5, lags 1-10."""
+    return _coarse_fine_mean(X, tau, k_max)
 
 
 @registry.register('Leverage')
 def compute_leverage(X: np.ndarray, Y: np.ndarray, k_max: int = 10) -> float:
-    """Leverage effect: mean (E[r_t * r_{t+k}^2] - E[r_t]*E[r_t^2]) / E[r_t^2]^2, lags 1-10.
-    Reported as (generated - reference) / |reference|. Closer to 0 is better.
-    """
-    return _rel(_leverage_mean(X, k_max), _leverage_mean(Y, k_max))
+    """Leverage effect: mean (E[r_t * r_{t+k}^2] - E[r_t]*E[r_t^2]) / E[r_t^2]^2, lags 1-10."""
+    return _leverage_mean(X, k_max)

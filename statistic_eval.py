@@ -11,7 +11,14 @@ class Evaluator:
             raise ValueError(f"Training data must be 2D [samples, assets]. Got {Y.ndim}D")
         self.Y = Y
         self.metrics = metrics
-        self.results = EvalResultCollection(training_shape=Y.shape, training_data=Y)
+
+        all_metrics = registry.get_all()
+        selected = {k: v for k, v in all_metrics.items() if metrics is None or k in metrics}
+        gt_result = EvalResult(name='GT', data=Y)
+        for metric_name, func in selected.items():
+            gt_result.metrics[metric_name] = func(Y, Y)
+
+        self.results = EvalResultCollection(training_shape=Y.shape, training_data=Y, gt_result=gt_result)
 
     def add(self, X: np.ndarray, name: str) -> 'Evaluator':
         if X.ndim != 2:

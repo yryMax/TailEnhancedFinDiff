@@ -2,21 +2,20 @@ import numpy as np
 import torch
 from diffusers import DDPMScheduler
 import os
-from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, FACTOR_DIM
+from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, IdentityScaler, BATCH_SIZE
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = "checkpoints/factor_ddpm_ep0120.pt"
+CHECKPOINT   = "checkpoints/factor_ddpm_50.pt"
 NUM_GENERATE = 2048
-BATCH_SIZE   = 128
+FACTOR_DIM = 6
 OUT_PATH     = f"samples/factor_ddpm_{NUM_GENERATE}.npy"
 
 
 # ── Sample ─────────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def generate(model, scheduler, scaler):
-
 
     model.eval()
     scheduler.set_timesteps(scheduler.config.num_train_timesteps)
@@ -98,12 +97,15 @@ if __name__ == "__main__":
 
     # unconditional
     samples = generate(model, scheduler, scaler)
+    np.save(OUT_PATH, samples)
+
+    """
     print("Unconditional  volatility: "
           f"mean={samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
           f"std={samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
-    np.save(OUT_PATH, samples)
 
 
+    
     # volatility > 0.001
     cond_samples = generate_conditional(model, scheduler, scaler,
                                         factor="volatility", threshold=0.001, guidance_scale=0.3)
@@ -111,3 +113,4 @@ if __name__ == "__main__":
     print(f"\nConditional (volatility > 0.001)  volatility: "
           f"mean={cond_samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
           f"std={cond_samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
+    """

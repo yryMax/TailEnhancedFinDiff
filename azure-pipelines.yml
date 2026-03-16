@@ -15,9 +15,16 @@ steps:
     displayName: 'Install Databricks CLI'
 
   - script: |
+      echo "Host: $DATABRICKS_HOST"
+      echo "Token length: ${#DATABRICKS_TOKEN}"
+      
       export DATABRICKS_HOST=$(DATABRICKS_HOST)
       export DATABRICKS_TOKEN=$(DATABRICKS_TOKEN)
       
+      echo "Testing connection..."
+      databricks fs ls dbfs:/ || echo "CONNECTION FAILED"
+      
+      echo "Copying files..."
       databricks fs cp ./diffusion_train.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_train.py --overwrite
       databricks fs cp ./diffusion_sample.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_sample.py --overwrite
     displayName: 'Sync diffusion scripts'

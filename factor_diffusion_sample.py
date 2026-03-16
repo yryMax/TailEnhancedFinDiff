@@ -7,7 +7,7 @@ from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, IdentityScaler,
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = "checkpoints/factor_ddpm_50.pt"
+CHECKPOINT   = "checkpoints/factor_ddpm_ep200.pt"
 NUM_GENERATE = 2048
 FACTOR_DIM = 6
 OUT_PATH     = f"samples/factor_ddpm_{NUM_GENERATE}.npy"

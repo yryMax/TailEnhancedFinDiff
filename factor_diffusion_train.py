@@ -123,7 +123,7 @@ def train(model, loader, scheduler, optimizer, scaler):
         "epoch":         epoch,
         "num_timesteps": NUM_TIMESTEPS,
         "losses":        losses,
-    }, f"checkpoints/factor_ddpm_quantileTransformer_ep{epoch:04d}.pt")
+    }, f"checkpoints/factor_ddpm_ep{epoch:04d}.pt")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, EPOCHS + 1), losses)

@@ -25,6 +25,6 @@ steps:
       databricks fs ls dbfs:/ || echo "CONNECTION FAILED"
       
       echo "Copying files..."
-      databricks fs cp ./diffusion_train.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_train.py --overwrite
-      databricks fs cp ./diffusion_sample.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_sample.py --overwrite
+      databricks fs cp ./factor_diffusion_train.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_train.py --overwrite
+      databricks fs cp ./factor_diffusion_sample.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_sample.py --overwrite
     displayName: 'Sync diffusion scripts'

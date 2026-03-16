@@ -24,7 +24,7 @@ FACTOR_NAMES  = ["growth", "momentum", "quality", "size", "value", "volatility"]
 EPOCHS        = 200
 BATCH_SIZE    = 64
 LR            = 1e-4
-NUM_TIMESTEPS = 30
+NUM_TIMESTEPS = 50
 
 def load_data(csv_path):
     X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)

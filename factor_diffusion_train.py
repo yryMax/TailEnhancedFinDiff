@@ -4,14 +4,48 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import QuantileTransformer
 from diffusers import DDPMScheduler
 from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-FACTOR_NAMES  = ["growth", "momentum", "quality", "size", "value", "volatility", "mcap"]
+
+class QuantileNormalizer:
+    """Drop-in replacement for sklearn's QuantileTransformer(output_distribution='normal').
+    Only uses numpy + torch — no sklearn required.
+    """
+
+    def __init__(self, n_quantiles: int = 1000):
+        self.n_quantiles = n_quantiles
+
+    def fit(self, X: np.ndarray):
+        n = min(len(X), self.n_quantiles)
+        self.refs_ = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        # quantiles_: shape (n_quantiles, n_features)
+        self.quantiles_ = np.quantile(X, self.refs_, axis=0).astype(np.float32)
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        U = np.empty(X.shape, dtype=np.float32)
+        for j in range(X.shape[1]):
+            U[:, j] = np.interp(X[:, j], self.quantiles_[:, j], self.refs_)
+        U = np.clip(U, 1e-7, 1 - 1e-7)
+        # Φ⁻¹(u) = √2 · erfinv(2u − 1)
+        return (torch.sqrt(torch.tensor(2.0)) *
+                torch.erfinv(2.0 * torch.from_numpy(U) - 1.0)).numpy()
+
+    def inverse_transform(self, Z: np.ndarray) -> np.ndarray:
+        Z_t = torch.from_numpy(Z.astype(np.float32))
+        # Φ(z) = 0.5 · (1 + erf(z / √2))
+        U = (0.5 * (1.0 + torch.erf(Z_t / torch.sqrt(torch.tensor(2.0))))).numpy()
+        U = np.clip(U, 0.0, 1.0)
+        out = np.empty(Z.shape, dtype=np.float32)
+        for j in range(Z.shape[1]):
+            out[:, j] = np.interp(U[:, j], self.refs_, self.quantiles_[:, j])
+        return out
+
+FACTOR_NAMES  = ["growth", "momentum", "quality", "size", "value", "volatility"]
 FACTOR_DIM    = 7
 EPOCHS        = 120
 BATCH_SIZE    = 128
@@ -20,7 +54,7 @@ NUM_TIMESTEPS = 200
 
 def load_data(csv_path):
     X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)
-    scaler = QuantileTransformer(output_distribution="normal", n_quantiles=min(len(X), 1000)).fit(X)
+    scaler = QuantileNormalizer(n_quantiles=min(len(X), 1000)).fit(X)
     return scaler.transform(X), scaler
 
 
@@ -92,7 +126,6 @@ def train(model, loader, scheduler, optimizer, scaler):
     fig.tight_layout()
     fig.savefig("assets/factor_ddpm_loss.png", dpi=150)
     plt.close(fig)
-    print("Loss curve → assets/factor_ddpm_loss.png")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

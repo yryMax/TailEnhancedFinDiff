@@ -44,10 +44,12 @@ if __name__ == "__main__":
     training = np.load("data/ROBECO.npy")
     psm = np.load("data/PSM2048.npy")
     bootstrap = np.load("data/SB2048.npy")
+    psm_diffusion = np.load("data/PSMDiffusion2048.npy").T
 
     results = (Evaluator(training)
         .add(psm, "parametric simulation model")
         .add(bootstrap, "Stationary Bootstrap")
+        .add(psm_diffusion, "Factor Diffusion")
         .report())
 
     print(results.to_console())

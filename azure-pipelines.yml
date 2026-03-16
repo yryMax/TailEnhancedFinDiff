@@ -1,0 +1,23 @@
+trigger:
+  branches:
+    include:
+      - dev
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.9'
+
+  - script: pip install databricks-cli
+    displayName: 'Install Databricks CLI'
+
+  - script: |
+      export DATABRICKS_HOST=$(DATABRICKS_HOST)
+      export DATABRICKS_TOKEN=$(DATABRICKS_TOKEN)
+      
+      databricks fs cp ./diffusion_train.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_train.py --overwrite
+      databricks fs cp ./diffusion_sample.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_sample.py --overwrite
+    displayName: 'Sync diffusion scripts'

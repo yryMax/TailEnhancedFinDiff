@@ -10,12 +10,8 @@ from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
+"""
 class QuantileNormalizer:
-    """Drop-in replacement for sklearn's QuantileTransformer(output_distribution='normal').
-    Only uses numpy + torch — no sklearn required.
-    """
-
     def __init__(self, n_quantiles: int = 1000):
         self.n_quantiles = n_quantiles
 
@@ -44,18 +40,28 @@ class QuantileNormalizer:
         for j in range(Z.shape[1]):
             out[:, j] = np.interp(U[:, j], self.refs_, self.quantiles_[:, j])
         return out
+"""
+
+
+class IdentityScaler:
+    def fit(self, X):
+        return self
+    def transform(self, X):
+        return X
+    def inverse_transform(self, X):
+        return X
+
 
 FACTOR_NAMES  = ["growth", "momentum", "quality", "size", "value", "volatility"]
-FACTOR_DIM    = 7
-EPOCHS        = 120
-BATCH_SIZE    = 128
-LR            = 2e-4
-NUM_TIMESTEPS = 200
+EPOCHS        = 200
+BATCH_SIZE    = 64
+LR            = 1e-4
+NUM_TIMESTEPS = 30
 
 def load_data(csv_path):
     X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)
-    scaler = QuantileNormalizer(n_quantiles=min(len(X), 1000)).fit(X)
-    return scaler.transform(X), scaler
+    scaler = IdentityScaler().fit(X)
+    return X, scaler
 
 
 # ── Model ──────────────────────────────────────────────────────────────────────
@@ -66,7 +72,8 @@ class FactorDenoiser(nn.Module):
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
         self.in_proj = nn.Linear(1, dim)
-        self.blocks  = nn.ModuleList([
+        self.feature_embed = nn.Parameter(torch.randn(1, 6, dim) * 0.02)
+        self.blocks = nn.ModuleList([
             BasicTransformerBlock(
                 dim=dim, num_attention_heads=n_heads, attention_head_dim=dim // n_heads,
                 norm_type="ada_norm_continuous",
@@ -79,6 +86,7 @@ class FactorDenoiser(nn.Module):
     def forward(self, x, t):
         cond = self.t_embed(self.t_sin(t))
         h = self.in_proj(x.unsqueeze(-1))
+        h = h + self.feature_embed
         for blk in self.blocks:
             h = blk(h, added_cond_kwargs={"pooled_text_emb": cond})
         return self.out_proj(h).squeeze(-1)
@@ -122,6 +130,7 @@ def train(model, loader, scheduler, optimizer, scaler):
     ax.set_xlabel("Epoch")
     ax.set_ylabel("MSE Loss")
     ax.set_title("Training Loss")
+    ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig("assets/factor_ddpm_loss.png", dpi=150)

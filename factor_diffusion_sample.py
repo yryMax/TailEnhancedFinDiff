@@ -7,7 +7,7 @@ from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, IdentityScaler,
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = "checkpoints/factor_ddpm_ep200.pt"
+CHECKPOINT   = "checkpoints/factor_ddpm_ep0200.pt"
 NUM_GENERATE = 2048
 FACTOR_DIM = 6
 OUT_PATH     = f"samples/factor_ddpm_{NUM_GENERATE}.npy"
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     samples = generate(model, scheduler, scaler)
     np.save(OUT_PATH, samples)
 
-    """
+
     print("Unconditional  volatility: "
           f"mean={samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
           f"std={samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
@@ -113,4 +113,4 @@ if __name__ == "__main__":
     print(f"\nConditional (volatility > 0.001)  volatility: "
           f"mean={cond_samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
           f"std={cond_samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
-    """
+

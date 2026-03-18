@@ -14,9 +14,9 @@ class EvalResult:
 
     def _format_value(self, value: Any) -> str:
         if isinstance(value, dict) and 'mean' in value:
-            return f"{value['mean']:.2f}±{value['std']:.2f}"
+            return f"{value['mean']:.4f}±{value['std']:.4f}"
         elif isinstance(value, float):
-            return f"{value:.2f}"
+            return f"{value:.4f}"
         return str(value)
 
     def to_dict(self) -> Dict[str, str]:
@@ -34,7 +34,7 @@ class EvalResultCollection:
     def append(self, result: EvalResult):
         self.results.append(result)
 
-    def _format_value(self, value: Any, mean_prec: int = 2, std_prec: int = 2) -> str:
+    def _format_value(self, value: Any, mean_prec: int = 4, std_prec: int = 4) -> str:
         if isinstance(value, dict) and 'mean' in value:
             return f"{value['mean']:.{mean_prec}f}±{value['std']:.{std_prec}f}"
         elif isinstance(value, (int, float, np.floating)):

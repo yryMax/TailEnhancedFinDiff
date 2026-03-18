@@ -8,7 +8,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 CHECKPOINT   = "checkpoints/factor_ddpm_ep0200.pt"
-NUM_GENERATE = 2048
+NUM_GENERATE =512
 FACTOR_DIM = 6
 OUT_PATH     = f"samples/factor_ddpm_{NUM_GENERATE}.npy"
 

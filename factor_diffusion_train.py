@@ -25,6 +25,8 @@ EPOCHS        = 200
 BATCH_SIZE    = 64
 LR            = 1e-4
 NUM_TIMESTEPS = 50
+PREFIX = "model/regression"
+
 
 def load_data(csv_path):
     X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)
@@ -84,6 +86,7 @@ def train(model, loader, scheduler, optimizer, scaler):
         losses.append(epoch_loss / len(loader.dataset))
         print(f"Epoch [{epoch:4d}/{EPOCHS}]  loss={losses[-1]:.6f}")
 
+    os.makedirs(f"{PREFIX}/checkpoints", exist_ok=True)
     torch.save({
         "model_state":   model.state_dict(),
         "model_kwargs":  model.kwargs,
@@ -91,7 +94,7 @@ def train(model, loader, scheduler, optimizer, scaler):
         "epoch":         epoch,
         "num_timesteps": NUM_TIMESTEPS,
         "losses":        losses,
-    }, f"checkpoints/factor_ddpm_ep{epoch:04d}.pt")
+    }, f"{PREFIX}/checkpoints/factor_ddpm_ep{epoch:04d}.pt")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, EPOCHS + 1), losses)
@@ -107,7 +110,7 @@ def train(model, loader, scheduler, optimizer, scaler):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    X, scaler = load_data("data/factor_returns_regression.csv")
+    X, scaler = load_data(f"{PREFIX}/factors.csv")
     print(f"Dataset: {X.shape}")
 
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)

@@ -1,27 +1,7 @@
-"""
-factor_model.py
----------------
-Extract factor returns (regression or port-sort), fit beta/alpha/residuals,
-and reconstruct stock returns from arbitrary factor samples.
-
-Typical usage
--------------
-    from factor_model import load_parquet, build_regression_factors,
-                             build_portsort_factors, fit_beta,
-                             reconstruct_returns, save_model, load_model
-
-    df   = load_parquet("data/train.parquet", "data/test.parquet")
-    R, F = build_regression_factors(df)
-    model = fit_beta(F, R)
-    model.save("data/factor_model_regression")
-
-    samples = reconstruct_returns(model, fs=my_diffusion_output)
-"""
-
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -71,7 +51,7 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         date, prev_date = dates[i], dates[i - 1]
 
         R_t = R.loc[date].sort_index()
-        B_cols = [chars[f].loc[prev_d,ate].sort_index() for f in FEATURES]
+        B_cols = [chars[f].loc[prev_date].sort_index() for f in FEATURES]
         B_df = pd.concat(B_cols, axis=1)
 
         mask = R_t.notna() & B_df.notna().all(axis=1)
@@ -144,6 +124,12 @@ class FactorModel:
     # factor type tag, either "regression" or "portsort"
     factor_type: str = "regression"
 
+    # factor names used to build F
+    features: list = field(default_factory=list)
+
+    # parquet path(s) used to fit the model
+    data_source: list = field(default_factory=list)
+
     # -----------------------------------------------------------------------
     # Persistence
     # -----------------------------------------------------------------------
@@ -154,33 +140,37 @@ class FactorModel:
           {prefix}_factors.csv   — factor return time series (human-readable)
           {prefix}_model.npz     — beta, res_std, residuals + scalar config
         """
-        os.makedirs(os.path.dirname(prefix) or ".", exist_ok=True)
+        os.makedirs(prefix, exist_ok=True)
 
-        self.F.to_csv(f"{prefix}_factors.csv")
+        self.F.to_csv(f"{prefix}/factors.csv")
 
         np.savez(
-            f"{prefix}_model.npz",
+            f"{prefix}/model.npz",
             beta=self.beta,
             res_std=self.res_std,
             residuals=self.residuals,
             factor_type=np.array(self.factor_type),
             factor_columns=np.array(self.F.columns.tolist()),
             factor_index=np.array(self.F.index.astype(str).tolist()),
+            features=np.array(self.features),
+            data_source=np.array(self.data_source),
         )
-        print(f"Saved → {prefix}_factors.csv + {prefix}_model.npz")
+        print(f"Saved → {prefix}/factors.csv + {prefix}/model.npz")
 
     @classmethod
     def load(cls, prefix: str) -> "FactorModel":
         """Load a model previously saved with .save()."""
-        F = pd.read_csv(f"{prefix}_factors.csv", index_col=0, parse_dates=True)
+        F = pd.read_csv(f"{prefix}/factors.csv", index_col=0, parse_dates=True)
 
-        npz = np.load(f"{prefix}_model.npz", allow_pickle=True)
+        npz = np.load(f"{prefix}/model.npz", allow_pickle=True)
         return cls(
             F=F,
             beta=npz["beta"],
             res_std=npz["res_std"],
             residuals=npz["residuals"],
             factor_type=str(npz["factor_type"]),
+            features=npz["features"].tolist(),
+            data_source=npz["data_source"].tolist(),
         )
 
 
@@ -211,7 +201,7 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame) -> FactorModel:
     for i in range(S):
         r = R_aligned.iloc[:, i]
         mask = r.notna()
-        if mask.sum() < K:
+        if mask.sum() == 0:
             continue
         beta[:, i] = np.linalg.lstsq(
             F_aligned.values[mask], r.values[mask], rcond=None
@@ -258,3 +248,9 @@ def save_model(model: FactorModel, prefix: str) -> None:
 
 def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
+
+if __name__ == '__main__':
+    df   = load_parquet("data/train24y.parquet")
+    R, F = build_regression_factors(df)
+    model = fit_beta(F, R)
+    model.save("model/regression")

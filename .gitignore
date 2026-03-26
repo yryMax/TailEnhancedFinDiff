@@ -216,5 +216,6 @@ output/
 data_generator/SP500
 data_generator/.idea
 *.png
-
+model/
 checkpoints/
+assets/

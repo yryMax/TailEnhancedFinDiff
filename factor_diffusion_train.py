@@ -20,7 +20,7 @@ class IdentityScaler:
         return X
 
 
-FACTOR_NAMES  = ["growth", "momentum", "quality", "size", "value", "volatility"]
+FACTOR_NAMES  = [ "market", "growth", "momentum", "quality", "size", "value", "volatility"]
 EPOCHS        = 200
 BATCH_SIZE    = 64
 LR            = 1e-4
@@ -40,7 +40,7 @@ class FactorDenoiser(nn.Module):
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
         self.in_proj = nn.Linear(1, dim)
-        self.feature_embed = nn.Parameter(torch.randn(1, 6, dim) * 0.02)
+        self.feature_embed = nn.Parameter(torch.randn(1, len(FACTOR_NAMES), dim) * 0.02)
         self.blocks = nn.ModuleList([
             BasicTransformerBlock(
                 dim=dim, num_attention_heads=n_heads, attention_head_dim=dim // n_heads,

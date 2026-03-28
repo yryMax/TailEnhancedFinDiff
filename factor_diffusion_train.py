@@ -4,9 +4,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from diffusers import DDPMScheduler
 from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
+from sklearn.preprocessing import StandardScaler
+from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,14 +25,16 @@ FACTOR_NAMES  = [ "market", "growth", "momentum", "quality", "size", "value", "v
 EPOCHS        = 200
 BATCH_SIZE    = 64
 LR            = 1e-4
-NUM_TIMESTEPS = 50
-PREFIX = "model/regression"
+NUM_TIMESTEPS = 100
+LEVY_ALPHA    = 1.9
+PREFIX        = "model/regression"
 
 
 def load_data(csv_path):
     X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)
-    scaler = IdentityScaler().fit(X)
-    return X, scaler
+    scaler = StandardScaler().fit(X)
+    X_norm = scaler.transform(X)
+    return X_norm, scaler
 
 
 # ── Model ──────────────────────────────────────────────────────────────────────
@@ -63,25 +66,54 @@ class FactorDenoiser(nn.Module):
 
 
 # ── Train ──────────────────────────────────────────────────────────────────────
-def train(model, loader, scheduler, optimizer, scaler):
+def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler):
+    """
+    DLPM training with Tail-Weighted Huber Loss.
+    """
     import matplotlib.pyplot as plt
     os.makedirs("checkpoints", exist_ok=True)
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+    # move schedule to device once
+    bargammas_d = bargammas.to(DEVICE)
+    barsigmas_d = barsigmas.to(DEVICE)
     losses = []
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
         epoch_loss = 0.0
         for (x,) in loader:
-            x     = x.to(DEVICE)
-            t     = torch.randint(0, NUM_TIMESTEPS, (x.size(0),), device=DEVICE)
-            noise = torch.randn_like(x)
-            loss  = nn.functional.mse_loss(model(scheduler.add_noise(x, noise, t), t), noise)
+            x   = x.to(DEVICE)
+            # t ∈ [1, T-1]
+            t   = torch.randint(1, NUM_TIMESTEPS, (x.size(0),), device=DEVICE)
+
+            bg  = bargammas_d[t].unsqueeze(-1)   # (B, 1)
+            bs  = barsigmas_d[t].unsqueeze(-1)   # (B, 1)
+
+            # Sample variance multiplier from skewed Lévy
+            a_t     = sample_skewed_levy(LEVY_ALPHA, x.shape, DEVICE)  # (B, D)
+            sigma_t = a_t * bs ** 2                                     # (B, D)
+
+            # Forward noising
+            z_t   = torch.randn_like(x)
+            x_t   = bg * x + sigma_t.sqrt() * z_t
+
+            # Target: normalized Lévy noise  (= sqrt(a_t) * z_t)
+            eps_t = (x_t - bg * x) / bs
+
+            # Predict noise
+            pred_noise = model(x_t, t)
+            
+            loss = nn.functional.mse_loss(pred_noise, eps_t)
+
+            # use huber_loss can panelty the extreme value
+            #loss = nn.functional.huber_loss(pred_noise, eps_t, reduction='mean', delta=3.0)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += loss.item() * x.size(0)
+
         lr_sched.step()
         losses.append(epoch_loss / len(loader.dataset))
         print(f"Epoch [{epoch:4d}/{EPOCHS}]  loss={losses[-1]:.6f}")
@@ -93,15 +125,18 @@ def train(model, loader, scheduler, optimizer, scaler):
         "scaler":        scaler,
         "epoch":         epoch,
         "num_timesteps": NUM_TIMESTEPS,
+        "levy_alpha":    LEVY_ALPHA,
+        "gammas":        gammas.cpu(),
+        "bargammas":     bargammas.cpu(),
+        "sigmas":        sigmas.cpu(),
+        "barsigmas":     barsigmas.cpu(),
         "losses":        losses,
     }, f"{PREFIX}/checkpoints/factor_ddpm_ep{epoch:04d}.pt")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, EPOCHS + 1), losses)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("MSE Loss")
-    ax.set_title("Training Loss")
-    ax.set_yscale("log")
+    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
+    ax.set_title(f"Training Loss (DLPM α={LEVY_ALPHA})")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig("assets/factor_ddpm_loss.png", dpi=150)
@@ -111,12 +146,12 @@ def train(model, loader, scheduler, optimizer, scaler):
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     X, scaler = load_data(f"{PREFIX}/factors.csv")
-    print(f"Dataset: {X.shape}")
+    print(f"Dataset: {X.shape}  |  LEVY_ALPHA={LEVY_ALPHA}  |  T={NUM_TIMESTEPS}")
+
+    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)
-    model     = FactorDenoiser().to(DEVICE)
-    scheduler = DDPMScheduler(num_train_timesteps=NUM_TIMESTEPS,
-                              beta_schedule="squaredcos_cap_v2", prediction_type="epsilon")
+    model     = FactorDenoiser(dim=128, n_heads=4, cond_dim=256, num_blocks=3).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 
-    train(model, loader, scheduler, optimizer, scaler)
+    train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler)

@@ -142,8 +142,8 @@ class FactorModel:
         """
         os.makedirs(prefix, exist_ok=True)
 
-        self.F.to_csv(f"{prefix}/factors.csv")
-
+        self.F.to_csv(f"{prefix}/test_factors.csv")
+        print(f"Saved → {prefix}/test_factors.csv")
         np.savez(
             f"{prefix}/model.npz",
             beta=self.beta,
@@ -250,7 +250,7 @@ def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
 
 if __name__ == '__main__':
-    df   = load_parquet("data/train24y.parquet")
+    df   = load_parquet("data/test1y.parquet")
     R, F = build_regression_factors(df)
     model = fit_beta(F, R)
     model.save("model/regression")

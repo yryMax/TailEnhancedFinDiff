@@ -27,6 +27,9 @@ BATCH_SIZE    = 64
 LR            = 1e-4
 NUM_TIMESTEPS = 100
 LEVY_ALPHA    = 1.9
+MODE          = "DLPM"   # "DDPM" | "DLPM"
+MC_OUTER      = 3        # outer MC samples: median taken over these (robust to Lévy spikes)
+MC_INNER      = 1        # inner MC samples: mean taken over these (z_t is Gaussian, 1 is enough)
 PREFIX        = "model/regression"
 
 
@@ -67,9 +70,6 @@ class FactorDenoiser(nn.Module):
 
 # ── Train ──────────────────────────────────────────────────────────────────────
 def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler):
-    """
-    DLPM training with Tail-Weighted Huber Loss.
-    """
     import matplotlib.pyplot as plt
     os.makedirs("checkpoints", exist_ok=True)
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -90,24 +90,48 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
             bg  = bargammas_d[t].unsqueeze(-1)   # (B, 1)
             bs  = barsigmas_d[t].unsqueeze(-1)   # (B, 1)
 
-            # Sample variance multiplier from skewed Lévy
-            a_t     = sample_skewed_levy(LEVY_ALPHA, x.shape, DEVICE)  # (B, D)
-            sigma_t = a_t * bs ** 2                                     # (B, D)
+            if MODE == "DDPM":
+                z_t        = torch.randn_like(x)
+                x_t        = bg * x + bs * z_t
+                pred_noise = model(x_t, t)
+                loss       = nn.functional.mse_loss(pred_noise, z_t)
+            else:
+                # DLPM: Median-of-Means over Lévy variance samples
+                # Outer a_t samples: different for each outer draw
+                # Inner z_t samples: independent Gaussians for same a_t
+                # → mean over inner, then median over outer
+                B, D = x.shape
+                N    = MC_OUTER * MC_INNER          # total MC samples
 
-            # Forward noising
-            z_t   = torch.randn_like(x)
-            x_t   = bg * x + sigma_t.sqrt() * z_t
+                # Expand x and t to (N*B, D)
+                x_mc  = x.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
+                t_mc  = t.repeat(N)
+                bg_mc = bargammas_d[t_mc].unsqueeze(-1)
+                bs_mc = barsigmas_d[t_mc].unsqueeze(-1)
 
-            # Target: normalized Lévy noise  (= sqrt(a_t) * z_t)
-            eps_t = (x_t - bg * x) / bs
+                # Outer a_t: (MC_OUTER, B, D) → replicate MC_INNER times → (N*B, D)
+                a_outer = sample_skewed_levy(LEVY_ALPHA, (MC_OUTER * B, D), DEVICE)
+                a_mc    = (a_outer.view(MC_OUTER, 1, B, D)
+                                  .expand(-1, MC_INNER, -1, -1)
+                                  .reshape(N * B, D))
 
-            # Predict noise
-            pred_noise = model(x_t, t)
-            
-            loss = nn.functional.mse_loss(pred_noise, eps_t)
+                sigma_mc  = a_mc * bs_mc ** 2
+                z_mc      = torch.randn(N * B, D, device=DEVICE)
+                x_t_mc    = bg_mc * x_mc + sigma_mc.sqrt() * z_mc
+                eps_t_mc  = (x_t_mc - bg_mc * x_mc) / bs_mc   # = sqrt(a_t) * z_t
+
+                pred_mc   = model(x_t_mc, t_mc)
+
+                # Per-sample squared error, mean over D → (N*B,)
+                losses_mc = (pred_mc - eps_t_mc).pow(2).mean(dim=-1)
+
+                # Reshape → (MC_OUTER, MC_INNER, B): mean over inner, median over outer
+                losses_mc = losses_mc.view(MC_OUTER, MC_INNER, B).mean(dim=1)
+                loss_med, _ = losses_mc.median(dim=0)          # (B,)
+                loss      = loss_med.mean()
 
             # use huber_loss can panelty the extreme value
-            #loss = nn.functional.huber_loss(pred_noise, eps_t, reduction='mean', delta=3.0)
+            # loss = nn.functional.huber_loss(pred_noise, eps_t, reduction='mean', delta=3.0)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -125,18 +149,19 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
         "scaler":        scaler,
         "epoch":         epoch,
         "num_timesteps": NUM_TIMESTEPS,
+        "mode":          MODE,
         "levy_alpha":    LEVY_ALPHA,
         "gammas":        gammas.cpu(),
         "bargammas":     bargammas.cpu(),
         "sigmas":        sigmas.cpu(),
         "barsigmas":     barsigmas.cpu(),
         "losses":        losses,
-    }, f"{PREFIX}/checkpoints/factor_ddpm_ep{epoch:04d}.pt")
+    }, f"{PREFIX}/checkpoints/factor_{MODE}_ep{epoch:04d}.pt")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, EPOCHS + 1), losses)
     ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
-    ax.set_title(f"Training Loss (DLPM α={LEVY_ALPHA})")
+    ax.set_title(f"Training Loss ({MODE}" + (f", α={LEVY_ALPHA}" if MODE == "DLPM" else "") + ")")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig("assets/factor_ddpm_loss.png", dpi=150)
@@ -146,7 +171,7 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     X, scaler = load_data(f"{PREFIX}/factors.csv")
-    print(f"Dataset: {X.shape}  |  LEVY_ALPHA={LEVY_ALPHA}  |  T={NUM_TIMESTEPS}")
+    print(f"Dataset: {X.shape}  |  MODE={MODE}" + (f"  |  LEVY_ALPHA={LEVY_ALPHA}" if MODE == "DLPM" else "") + f"  |  T={NUM_TIMESTEPS}")
 
     gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 

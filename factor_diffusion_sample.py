@@ -1,22 +1,22 @@
 import numpy as np
 import torch
 import os
-from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, PREFIX, BATCH_SIZE, EPOCHS
+from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, PREFIX, BATCH_SIZE, EPOCHS, MODE
 from factor_diffusion_levy import sample_skewed_levy, sample_sas
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = PREFIX + f"/checkpoints/factor_ddpm_ep0{EPOCHS}.pt"
+CHECKPOINT   = PREFIX + f"/checkpoints/factor_{MODE}_ep0{EPOCHS}.pt"
 NUM_GENERATE = 2048
 FACTOR_DIM   = len(FACTOR_NAMES)
 os.makedirs(f"{PREFIX}/samples", exist_ok=True)
-OUT_PATH     = f"{PREFIX}/samples/factor_ddpm_{NUM_GENERATE}.npy"
+OUT_PATH     = f"{PREFIX}/samples/factor_{MODE}_{NUM_GENERATE}.npy"
 
 
 # ── Sample ─────────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler):
+def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler, mode="DDPM"):
     """
     DLPM reverse process.
 
@@ -45,16 +45,22 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler):
         shape = (n, FACTOR_DIM)
 
         # ── Step 1: pre-sample full A_{1:T} path ──────────────────────────────
-        A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
+        if mode == "DDPM":
+            A = [torch.ones(shape, device=DEVICE) for _ in range(T)]
+        else:
+            A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
 
         # ── Step 2: compute Sigma chain ────────────────────────────────────────
         Sigmas = [sigmas[0] ** 2 * A[0]]
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        # ── Step 3: starting noise x_T ~ barsigmas[-1] * SαS ──────────────────
-        a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
-        x = barsigmas[-1] * sample_sas(shape, a_init)
+        # ── Step 3: starting noise x_T ~ barsigmas[-1] * SαS (or Gaussian) ───
+        if mode == "DDPM":
+            x = barsigmas[-1] * torch.randn(*shape, device=DEVICE)
+        else:
+            a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
+            x = barsigmas[-1] * sample_sas(shape, a_init)
 
         # ── Step 4: reverse denoising T-1 → 1 ─────────────────────────────────
         for t in range(T - 1, 0, -1):
@@ -139,12 +145,14 @@ if __name__ == "__main__":
     model.load_state_dict(ckpt["model_state"])
 
     scaler     = ckpt["scaler"]
+    mode       = ckpt.get("mode", "DDPM")
     levy_alpha = ckpt["levy_alpha"]
     gammas     = ckpt["gammas"]
     bargammas  = ckpt["bargammas"]
     sigmas     = ckpt["sigmas"]
     barsigmas  = ckpt["barsigmas"]
 
-    samples = generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler)
+    print(f"MODE={mode}" + (f", LEVY_ALPHA={levy_alpha}" if mode == "DLPM" else ""))
+    samples = generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler, mode=mode)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

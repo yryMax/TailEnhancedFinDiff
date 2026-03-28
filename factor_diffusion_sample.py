@@ -1,37 +1,84 @@
 import numpy as np
 import torch
-from diffusers import DDPMScheduler
 import os
-from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, PREFIX, IdentityScaler, BATCH_SIZE
+from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, PREFIX, BATCH_SIZE, EPOCHS
+from factor_diffusion_levy import sample_skewed_levy, sample_sas
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = PREFIX + "/checkpoints/factor_ddpm_ep0200.pt"
-NUM_GENERATE = 1000
-FACTOR_DIM = len(FACTOR_NAMES)
+CHECKPOINT   = PREFIX + f"/checkpoints/factor_ddpm_ep0{EPOCHS}.pt"
+NUM_GENERATE = 2048
+FACTOR_DIM   = len(FACTOR_NAMES)
 os.makedirs(f"{PREFIX}/samples", exist_ok=True)
 OUT_PATH     = f"{PREFIX}/samples/factor_ddpm_{NUM_GENERATE}.npy"
 
 
 # ── Sample ─────────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def generate(model, scheduler, scaler):
+def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler):
+    """
+    DLPM reverse process.
+
+    For each batch:
+    1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1) — the full Lévy path.
+    2. Compute Sigma_t chain:
+           Sigma_0 = sigma_0^2 * A_0
+           Sigma_t = sigma_t^2 * A_t + gamma_t^2 * Sigma_{t-1}
+    3. Start from x_T ~ barsigmas[-1] * SαS  (marginal forward distribution).
+    4. Reverse denoising T-1 → 1:
+           Gamma_t  = 1 - gamma_t^2 * Sigma_{t-1} / Sigma_t
+           mean     = (x_t - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
+           variance = Gamma_t * Sigma_{t-1}
+           x_{t-1}  = mean + sqrt(variance) * N(0,I)
+    """
+    T = len(gammas)
+    gammas    = gammas.to(DEVICE)
+    sigmas    = sigmas.to(DEVICE)
+    barsigmas = barsigmas.to(DEVICE)
 
     model.eval()
-    scheduler.set_timesteps(scheduler.config.num_train_timesteps)
     batches = []
-    for start in range(0, NUM_GENERATE, BATCH_SIZE):
-        n = min(BATCH_SIZE, NUM_GENERATE - start)
-        # start from pure noise
-        x = torch.randn(n, FACTOR_DIM, device=DEVICE)
-        # for each timestep
-        for t_val in scheduler.timesteps:
-            # broadcast timestep to batch
-            t_b = torch.full((n,), t_val, dtype=torch.long, device=DEVICE)
 
-            # predict noise and compute previous sample
-            x   = scheduler.step(model(x, t_b), t_val, x).prev_sample
+    for start in range(0, NUM_GENERATE, BATCH_SIZE):
+        n     = min(BATCH_SIZE, NUM_GENERATE - start)
+        shape = (n, FACTOR_DIM)
+
+        # ── Step 1: pre-sample full A_{1:T} path ──────────────────────────────
+        A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
+
+        # ── Step 2: compute Sigma chain ────────────────────────────────────────
+        Sigmas = [sigmas[0] ** 2 * A[0]]
+        for t in range(1, T):
+            Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
+
+        # ── Step 3: starting noise x_T ~ barsigmas[-1] * SαS ──────────────────
+        a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
+        x = barsigmas[-1] * sample_sas(shape, a_init)
+
+        # ── Step 4: reverse denoising T-1 → 1 ─────────────────────────────────
+        for t in range(T - 1, 0, -1):
+            t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
+            eps_pred = model(x, t_b)
+
+            Sigma_t  = Sigmas[t]
+            Sigma_t1 = Sigmas[t - 1]
+
+            # posterior contraction factor
+            Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
+            Gamma_t = Gamma_t.clamp(0.0, 1.0)
+
+            # posterior mean
+            mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
+
+            # posterior variance (Gaussian, conditioned on A)
+            var = (Gamma_t * Sigma_t1).clamp(min=0.0)
+
+            if t > 1:
+                x = mean + var.sqrt() * torch.randn_like(x)
+            else:
+                x = mean   # no noise at last step
+
         batches.append(x.cpu())
     return scaler.inverse_transform(torch.cat(batches).numpy())
 
@@ -86,32 +133,18 @@ def generate_conditional(model, scheduler, scaler, factor, threshold, guidance_s
 
 
 if __name__ == "__main__":
-    os.makedirs("samples", exist_ok=True)
-    ckpt   = torch.load(CHECKPOINT, map_location=DEVICE, weights_only=False)
-    model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
+    ckpt = torch.load(CHECKPOINT, map_location=DEVICE, weights_only=False)
+    print(f"Loaded checkpoint from {CHECKPOINT}, generate {NUM_GENERATE} samples...")
+    model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
-    scaler        = ckpt["scaler"]
-    num_timesteps = ckpt["num_timesteps"]
 
-    scheduler = DDPMScheduler(num_train_timesteps=num_timesteps,
-                              beta_schedule="squaredcos_cap_v2", prediction_type="epsilon")
+    scaler     = ckpt["scaler"]
+    levy_alpha = ckpt["levy_alpha"]
+    gammas     = ckpt["gammas"]
+    bargammas  = ckpt["bargammas"]
+    sigmas     = ckpt["sigmas"]
+    barsigmas  = ckpt["barsigmas"]
 
-    # unconditional
-    samples = generate(model, scheduler, scaler)
+    samples = generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler)
     np.save(OUT_PATH, samples)
-
-    """
-    print("Unconditional  volatility: "
-          f"mean={samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
-          f"std={samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
-
-    
-    
-    # volatility > 0.001
-    cond_samples = generate_conditional(model, scheduler, scaler,
-                                        factor="volatility", threshold=0.001, guidance_scale=0.3)
-    np.save(f"samples/factor_ddpm_cond_volatility_{NUM_GENERATE}.npy", cond_samples)
-    print(f"\nConditional (volatility > 0.001)  volatility: "
-          f"mean={cond_samples[:, FACTOR_NAMES.index('volatility')].mean():+.6f}  "
-          f"std={cond_samples[:, FACTOR_NAMES.index('volatility')].std():.6f}")
-    """
+    print(f"Saved {samples.shape} samples → {OUT_PATH}")

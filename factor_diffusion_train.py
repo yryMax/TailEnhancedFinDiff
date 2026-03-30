@@ -67,6 +67,36 @@ class FactorDenoiser(nn.Module):
             h = blk(h, added_cond_kwargs={"pooled_text_emb": cond})
         return self.out_proj(h).squeeze(-1)
 
+"""
+class FactorDenoiserMLP(nn.Module):
+    def __init__(self, dim=7, hidden_dim=64, cond_dim=128):
+        super().__init__()
+        self.kwargs = dict(dim=dim, hidden_dim=hidden_dim, cond_dim=cond_dim)
+
+        self.t_sin = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
+        self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
+
+        self.net1 = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.SiLU()
+        )
+
+        self.time_proj = nn.Linear(cond_dim, hidden_dim)
+
+        self.net2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim)
+        )
+
+    def forward(self, x, t):
+        t_emb = self.t_embed(self.t_sin(t))  # (B, cond_dim)
+        t_hidden = self.time_proj(t_emb)  # (B, hidden_dim)
+        h = self.net1(x)  # (B, hidden_dim)
+        h = h + t_hidden
+        out = self.net2(h)  # (B, dim=7)
+        return out
+"""
 
 # ── Train ──────────────────────────────────────────────────────────────────────
 def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler):
@@ -91,8 +121,8 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
             bs  = barsigmas_d[t].unsqueeze(-1)   # (B, 1)
 
             if MODE == "DDPM":
-                z_t        = torch.randn_like(x)
-                x_t        = bg * x + bs * z_t
+                z_t = torch.randn_like(x)
+                x_t = bg * x + bs * z_t
                 pred_noise = model(x_t, t)
                 loss       = nn.functional.mse_loss(pred_noise, z_t)
             else:
@@ -176,7 +206,7 @@ if __name__ == "__main__":
     gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)
-    model     = FactorDenoiser(dim=128, n_heads=4, cond_dim=256, num_blocks=3).to(DEVICE)
+    model     = FactorDenoiser().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 
     train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler)

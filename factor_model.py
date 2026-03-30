@@ -197,7 +197,7 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
                        residuals=residuals, factor_type=factor_type, data_source=path)
 
 
-def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
+def reconstruct_returns(model: FactorModel, fs: np.ndarray, df: float = 5.0) -> np.ndarray:
     """
     Reconstruct stock returns from factor samples.
 
@@ -205,6 +205,8 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     ----------
     model : FactorModel
     fs    : (N, K) array of factor samples — same column order as model.F
+    df    : degrees of freedom for the idiosyncratic t-distribution.
+            Smaller df → heavier tails. Use df=None for Gaussian.
 
     Returns
     -------
@@ -212,7 +214,11 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta                                         # (N, S)
-    idiosyncratic = np.random.normal(0, 1, size=(N, S)) * model.res_std # (N, S)
+    if df is None:
+        noise = np.random.normal(0, 1, size=(N, S))
+    else:
+        noise = np.random.standard_t(df, size=(N, S)) * np.sqrt((df - 2) / df)
+    idiosyncratic = noise * model.res_std
     return systematic + idiosyncratic
 
 

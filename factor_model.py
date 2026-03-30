@@ -6,20 +6,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
 FEATURES: list[str] = ["growth", "momentum", "quality", "size", "value", "volatility"]
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-
-def load_parquet(*paths: str) -> pd.DataFrame:
+def load_parquet(path: str) -> pd.DataFrame:
     """Concatenate one or more parquet files into a single DataFrame."""
-    return pd.concat([pd.read_parquet(p) for p in paths], axis=0)
+    return pd.read_parquet(path)
 
 
 def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
@@ -43,6 +35,9 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     F : (T-1, K+1) factor returns, columns = ['alpha', 'market', *FACTORS]
         alpha column is a constant 1.0 (intercept of the second-stage OLS in fit_beta)
     """
+
+    df = load_parquet(path)
+    print(f"Loaded data with {len(df)} rows, {len(df['date'].unique())} dates, {len(df['csecid'].unique())} stocks.")
     R, chars = _pivot(df)
     dates = sorted(R.index.unique())
 
@@ -100,11 +95,6 @@ def build_portsort_factors(df: pd.DataFrame, N_QUANTILES = 5) -> tuple[pd.DataFr
     F = pd.DataFrame(spreads, index=valid_dates)
     return R, F
 
-
-# ---------------------------------------------------------------------------
-# Factor model dataclass
-# ---------------------------------------------------------------------------
-
 @dataclass
 class FactorModel:
     """Fitted factor model: R ≈ F @ beta + eps."""
@@ -128,11 +118,7 @@ class FactorModel:
     features: list = field(default_factory=list)
 
     # parquet path(s) used to fit the model
-    data_source: list = field(default_factory=list)
-
-    # -----------------------------------------------------------------------
-    # Persistence
-    # -----------------------------------------------------------------------
+    data_source: str = ""
 
     def save(self, prefix: str) -> None:
         """
@@ -142,8 +128,7 @@ class FactorModel:
         """
         os.makedirs(prefix, exist_ok=True)
 
-        self.F.to_csv(f"{prefix}/test_factors.csv")
-        print(f"Saved → {prefix}/test_factors.csv")
+        self.F.to_csv(f"{prefix}/factors.csv")
         np.savez(
             f"{prefix}/model.npz",
             beta=self.beta,
@@ -153,9 +138,10 @@ class FactorModel:
             factor_columns=np.array(self.F.columns.tolist()),
             factor_index=np.array(self.F.index.astype(str).tolist()),
             features=np.array(self.features),
-            data_source=np.array(self.data_source),
+            data_source=np.array(self.data_source)
         )
-        print(f"Saved → {prefix}/factors.csv + {prefix}/model.npz")
+
+        print(f"Model saved to {prefix}/factors.csv and {prefix}/model.npz")
 
     @classmethod
     def load(cls, prefix: str) -> "FactorModel":
@@ -173,12 +159,7 @@ class FactorModel:
             data_source=npz["data_source"].tolist(),
         )
 
-
-# ---------------------------------------------------------------------------
-# Fitting
-# ---------------------------------------------------------------------------
-
-def fit_beta(F: pd.DataFrame, R: pd.DataFrame) -> FactorModel:
+def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
     """
     Fit per-stock OLS betas: r_s = F @ beta_s + eps_s
 
@@ -213,12 +194,8 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame) -> FactorModel:
 
     factor_type = "portsort" if "alpha" not in F.columns else "regression"
     return FactorModel(F=F_aligned, beta=beta, res_std=res_std,
-                       residuals=residuals, factor_type=factor_type)
+                       residuals=residuals, factor_type=factor_type, data_source=path)
 
-
-# ---------------------------------------------------------------------------
-# Reconstruction
-# ---------------------------------------------------------------------------
 
 def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     """
@@ -239,10 +216,6 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     return systematic + idiosyncratic
 
 
-# ---------------------------------------------------------------------------
-# Convenience aliases
-# ---------------------------------------------------------------------------
-
 def save_model(model: FactorModel, prefix: str) -> None:
     model.save(prefix)
 
@@ -250,7 +223,8 @@ def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
 
 if __name__ == '__main__':
-    df   = load_parquet("data/test1y.parquet")
+    path = "data/test1y.parquet"
+    df   = load_parquet(path)
     R, F = build_regression_factors(df)
-    model = fit_beta(F, R)
-    model.save("model/regression")
+    model = fit_beta(F, R, path)
+    model.save("model/regression/test")

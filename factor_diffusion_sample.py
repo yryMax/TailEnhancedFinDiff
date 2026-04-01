@@ -8,7 +8,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 CHECKPOINT   = PREFIX + f"/checkpoints/factor_{MODE}_ep0{EPOCHS}.pt"
-NUM_GENERATE = 2048
+NUM_GENERATE = 4096
 FACTOR_DIM   = len(FACTOR_NAMES)
 os.makedirs(f"{PREFIX}/samples", exist_ok=True)
 OUT_PATH     = f"{PREFIX}/samples/factor_{MODE}_{NUM_GENERATE}.npy"

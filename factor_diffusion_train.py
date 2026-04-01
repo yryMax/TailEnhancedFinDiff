@@ -40,7 +40,6 @@ def load_data(csv_path):
     return X_norm, scaler
 
 
-# ── Model ──────────────────────────────────────────────────────────────────────
 class FactorDenoiser(nn.Module):
     def __init__(self, dim=64, n_heads=4, cond_dim=128, num_blocks=1):
         super().__init__()
@@ -98,13 +97,11 @@ class FactorDenoiserMLP(nn.Module):
         return out
 """
 
-# ── Train ──────────────────────────────────────────────────────────────────────
 def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler):
     import matplotlib.pyplot as plt
     os.makedirs("checkpoints", exist_ok=True)
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    # move schedule to device once
     bargammas_d = bargammas.to(DEVICE)
     barsigmas_d = barsigmas.to(DEVICE)
     losses = []
@@ -198,7 +195,6 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
     plt.close(fig)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     X, scaler = load_data(f"{PREFIX}/factors.csv")
     print(f"Dataset: {X.shape}  |  MODE={MODE}" + (f"  |  LEVY_ALPHA={LEVY_ALPHA}" if MODE == "DLPM" else "") + f"  |  T={NUM_TIMESTEPS}")

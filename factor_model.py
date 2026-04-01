@@ -5,13 +5,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as scipy_t
 
 FEATURES: list[str] = ["growth", "momentum", "quality", "size", "value", "volatility"]
-
-
-def load_parquet(path: str) -> pd.DataFrame:
-    """Concatenate one or more parquet files into a single DataFrame."""
-    return pd.read_parquet(path)
 
 
 def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
@@ -19,11 +15,6 @@ def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     R = df.pivot_table(index="date", columns="csecid", values="returns")
     chars = {f: df.pivot_table(index="date", columns="csecid", values=f) for f in FEATURES}
     return R, chars
-
-
-# ---------------------------------------------------------------------------
-# Factor return construction
-# ---------------------------------------------------------------------------
 
 def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -36,8 +27,6 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         alpha column is a constant 1.0 (intercept of the second-stage OLS in fit_beta)
     """
 
-    df = load_parquet(path)
-    print(f"Loaded data with {len(df)} rows, {len(df['date'].unique())} dates, {len(df['csecid'].unique())} stocks.")
     R, chars = _pivot(df)
     dates = sorted(R.index.unique())
 
@@ -108,6 +97,9 @@ class FactorModel:
     # per-stock residual std (S,)
     res_std: np.ndarray
 
+    # degrees of freedom fitted from pooled standardised residuals
+    res_df: float
+
     # time-series residuals (T, S), may contain NaN for missing observations
     residuals: np.ndarray
 
@@ -133,6 +125,7 @@ class FactorModel:
             f"{prefix}/model.npz",
             beta=self.beta,
             res_std=self.res_std,
+            res_df=np.array(self.res_df),
             residuals=self.residuals,
             factor_type=np.array(self.factor_type),
             factor_columns=np.array(self.F.columns.tolist()),
@@ -153,6 +146,7 @@ class FactorModel:
             F=F,
             beta=npz["beta"],
             res_std=npz["res_std"],
+            res_df=float(npz["res_df"]),
             residuals=npz["residuals"],
             factor_type=str(npz["factor_type"]),
             features=npz["features"].tolist(),
@@ -188,16 +182,23 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
             F_aligned.values[mask], r.values[mask], rcond=None
         )[0]
 
-    R_hat = F_aligned.values @ beta                    # (T, S)
-    residuals = R_aligned.values - R_hat               # (T, S)
-    res_std = np.sqrt(np.nanmean(residuals ** 2, axis=0))  # (S,)
+    R_hat = F_aligned.values @ beta
+    residuals = R_aligned.values - R_hat
+    res_std = np.sqrt(np.nanmean(residuals ** 2, axis=0))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        std_res = residuals / np.where(res_std > 0, res_std, np.nan)
+    flat = std_res.ravel()
+    flat = flat[np.isfinite(flat)]
+    df_fit, _, _ = scipy_t.fit(flat, floc=0)
+    print(f"Fitted residual t-distribution: df = {df_fit:.3f}")
 
     factor_type = "portsort" if "alpha" not in F.columns else "regression"
-    return FactorModel(F=F_aligned, beta=beta, res_std=res_std,
+    return FactorModel(F=F_aligned, beta=beta, res_std=res_std, res_df=df_fit,
                        residuals=residuals, factor_type=factor_type, data_source=path)
 
 
-def reconstruct_returns(model: FactorModel, fs: np.ndarray, df: float = 5.0) -> np.ndarray:
+def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     """
     Reconstruct stock returns from factor samples.
 
@@ -205,8 +206,6 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray, df: float = 5.0) -> 
     ----------
     model : FactorModel
     fs    : (N, K) array of factor samples — same column order as model.F
-    df    : degrees of freedom for the idiosyncratic t-distribution.
-            Smaller df → heavier tails. Use df=None for Gaussian.
 
     Returns
     -------
@@ -214,10 +213,7 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray, df: float = 5.0) -> 
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta                                         # (N, S)
-    if df is None:
-        noise = np.random.normal(0, 1, size=(N, S))
-    else:
-        noise = np.random.standard_t(df, size=(N, S)) * np.sqrt((df - 2) / df)
+    noise = np.random.standard_t(model.res_df, size=(N, S)) * np.sqrt((model.res_df - 2) / model.res_df)
     idiosyncratic = noise * model.res_std
     return systematic + idiosyncratic
 
@@ -228,9 +224,14 @@ def save_model(model: FactorModel, prefix: str) -> None:
 def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
 
-if __name__ == '__main__':
-    path = "data/test1y.parquet"
-    df   = load_parquet(path)
+
+def get_factor_model(path: str) -> FactorModel:
+    df   = pd.read_parquet(path)
     R, F = build_regression_factors(df)
     model = fit_beta(F, R, path)
-    model.save("model/regression/test")
+    return model
+
+
+if __name__ == '__main__':
+    get_factor_model("data/train24y.parquet").save("model/regression")
+    get_factor_model("data/test1y.parquet").save("model/regression/test")

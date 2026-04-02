@@ -1,5 +1,5 @@
 import numpy as np
-from metrics.statistic import registry
+from legacy.metrics import registry
 from result import EvalResult, EvalResultCollection
 
 

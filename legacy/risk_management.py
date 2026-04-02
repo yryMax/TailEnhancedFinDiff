@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize
-from metrics.risk import registry
+from legacy.metrics import registry
 from result import EvalResult, EvalResultCollection
 
 

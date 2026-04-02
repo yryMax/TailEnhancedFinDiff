@@ -212,7 +212,7 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     R_gen : (N, S) reconstructed stock returns
     """
     N, S = fs.shape[0], model.beta.shape[1]
-    systematic = fs @ model.beta                                         # (N, S)
+    systematic = fs @ model.beta
     noise = np.random.standard_t(model.res_df, size=(N, S)) * np.sqrt((model.res_df - 2) / model.res_df)
     idiosyncratic = noise * model.res_std
     return systematic + idiosyncratic

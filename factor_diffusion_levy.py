@@ -59,6 +59,7 @@ def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
              - val0 * (torch.sin(aTH) - torch.cos(aTH) * tan_t))
     raw   = (W / denom) * (num / W) ** (1.0 / a)
 
+    raw   = torch.nan_to_num(raw, nan=1.0, posinf=CLAMP_A, neginf=0.0)
     raw   = raw.float().clamp(0.0, CLAMP_A).reshape(shape)
     return raw.to(device) if device is not None else raw
 

@@ -48,7 +48,10 @@ After running `factor_model.py`, the derived folder should be structured as foll
 │       └── samples/ # generated factor return samples
 ```
 
-### CONFIGURATION
+The stock returns can be constructed in memory via sampled factor and factor model.
+
+
+### TRAINING
 
 Edit `cfg.yaml` to configure hyperparameters before running:
 
@@ -66,13 +69,6 @@ sample:
   num_generate: 4096
 ```
 
-**Monte Carlo loss estimator** (`mc_outer` / `mc_inner`):
-The DLPM training loss is an expectation over the Lévy subordinator `a ~ S(alpha/2, 1)`, which has heavy tails and can produce extreme values. The *median-of-means* estimator reduces variance:
-
-- `mc_inner` i.i.d. Gaussian draws `z` are taken for the same `a`; squared errors are **averaged** — reduces variance from the Gaussian component.
-- `mc_outer` independent draws of `a` each yield one inner mean; the **median** is taken across these — robust against rare extreme Lévy draws.
-
-Setting both to `1` degenerates to a standard single-sample MSE (equivalent to DDPM training). Increasing `mc_outer` (e.g. 5–10) improves stability when `levy_alpha` is small, at a proportional compute cost.
 
 ### RUNNING
 

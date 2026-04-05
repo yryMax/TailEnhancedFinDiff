@@ -1,4 +1,5 @@
 import os
+import yaml
 import numpy as np
 import pandas as pd
 import torch
@@ -11,16 +12,18 @@ from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sampl
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-FACTOR_NAMES  = [ "market", "growth", "momentum", "quality", "size", "value", "volatility"]
-EPOCHS        = 200
-BATCH_SIZE    = 64
-LR            = 1e-4
-NUM_TIMESTEPS = 100
-LEVY_ALPHA    = 1.9
-MODE          = "DLPM"   # "DDPM" | "DLPM"
-MC_OUTER      = 1        # outer MC samples: median taken over these (robust to Lévy spikes)
-MC_INNER      = 1        # inner MC samples: mean taken over these
-PREFIX        = "model/regression"
+with open("cfg.yaml") as f:
+    _cfg = yaml.safe_load(f)["train"]
+
+FACTOR_NAMES  = _cfg["factor_names"]
+EPOCHS        = _cfg["epochs"]
+BATCH_SIZE    = _cfg["batch_size"]
+LR            = _cfg["lr"]
+NUM_TIMESTEPS = _cfg["num_timesteps"]
+LEVY_ALPHA    = _cfg["levy_alpha"]
+MC_OUTER      = _cfg["mc_outer"]
+MC_INNER      = _cfg["mc_inner"]
+PREFIX        = _cfg["prefix"]
 
 
 def load_data(csv_path):
@@ -76,8 +79,8 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device):
     Compute DLPM epsilon-prediction loss via median-of-means MC estimator.
     When mc_outer=1 and mc_inner=1, degenerates to a single-sample MSE (no MC overhead).
     Forward process: x_t = bg * x_0 + bs * eps,  eps = sample_sas(a),  a ~ S(alpha/2, 1)
-    Target:          eps_t = sample_sas(a)
-    Loss:            E[(model(x_t, t) - eps_t)^2], mean over inner then median over outer
+    Target:  eps_t = sample_sas(a)
+    Loss:    E[(model(x_t, t) - eps_t)^2], mean over inner then median over outer
     """
     B, D = x.shape
 
@@ -107,7 +110,7 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device):
     return loss.mean()
 
 
-def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler):
+def train(model, loader, bargammas, barsigmas, optimizer, scaler):
     import matplotlib.pyplot as plt
     os.makedirs("checkpoints", exist_ok=True)
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -141,39 +144,28 @@ def train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler
 
     os.makedirs(f"{PREFIX}/checkpoints", exist_ok=True)
     torch.save({
-        "model_state":   model.state_dict(),
-        "model_kwargs":  model.kwargs,
-        "scaler":        scaler,
-        "epoch":         epoch,
-        "num_timesteps": NUM_TIMESTEPS,
-        "mode":          MODE,
-        "levy_alpha":    LEVY_ALPHA,
-        "gammas":        gammas.cpu(),
-        "bargammas":     bargammas.cpu(),
-        "sigmas":        sigmas.cpu(),
-        "barsigmas":     barsigmas.cpu(),
-        "losses":        losses,
-    }, f"{PREFIX}/checkpoints/factor_{MODE}_ep{epoch:04d}.pt")
+        "model_state":  model.state_dict(),
+        "model_kwargs": model.kwargs,
+        "scaler":       scaler,
+    }, f"{PREFIX}/checkpoints/factor_ep{epoch:04d}.pt")
 
     # save the loss plot
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, EPOCHS + 1), losses)
     ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
-    ax.set_title(f"Training Loss ({MODE}" + (f", α={LEVY_ALPHA}" if MODE == "DLPM" else "") + ")")
+    ax.set_title(f"Training Loss")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig("assets/factor_ddpm_loss.png", dpi=150)
+    fig.savefig("assets/factor_loss.png", dpi=150)
     plt.close(fig)
 
 
 if __name__ == "__main__":
     X, scaler = load_data(f"{PREFIX}/factors.csv")
-    print(f"Dataset: {X.shape}  |  MODE={MODE}" + (f"  |  LEVY_ALPHA={LEVY_ALPHA}" if MODE == "DLPM" else "") + f"  |  T={NUM_TIMESTEPS}")
-
-    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
+    _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)
     model     = FactorDenoiser().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 
-    train(model, loader, gammas, bargammas, sigmas, barsigmas, optimizer, scaler)
+    train(model, loader, bargammas, barsigmas, optimizer, scaler)

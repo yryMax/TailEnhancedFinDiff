@@ -1,0 +1,13 @@
+train:
+  factor_names:  [market, growth, momentum, quality, size, value, volatility] # name of characteristics that are expected to calculate the factor returns
+  epochs:        100 # number of epochs to train the model
+  batch_size:    64 # batch size for training
+  lr:            1.0e-4 # learning rate for the adam optimizer
+  num_timesteps: 100 # number of diffusion steps
+  levy_alpha:    1.9 # alpha parameter for the levy distribution used in the noise scheduler, it is supposed to be between [0,2] when alpha=2 the distribution decays to a normal gaussion
+  mc_outer:      1 # number of outer Monte Carlo samples to estimate the aggregated median loss
+  mc_inner:      1 # number of inner Monte Carlo samples to estimate the aggregated mean loss
+  prefix:        model/regression # prefix for the current experiment
+
+sample:
+  num_generate:  4096

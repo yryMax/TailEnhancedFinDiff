@@ -1,17 +1,30 @@
+import os
+import yaml
 import numpy as np
 import torch
-import os
-from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES, PREFIX, BATCH_SIZE, EPOCHS, MODE
-from factor_diffusion_levy import sample_skewed_levy, sample_sas
+from factor_diffusion_train import FactorDenoiser
+from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-CHECKPOINT   = PREFIX + f"/checkpoints/factor_{MODE}_ep0{EPOCHS}.pt"
-NUM_GENERATE = 4096
-FACTOR_DIM   = len(FACTOR_NAMES)
+with open("cfg.yaml") as f:
+    _all_cfg = yaml.safe_load(f)
+    _tcfg    = _all_cfg["train"]
+    _scfg    = _all_cfg["sample"]
 
-OUT_PATH     = f"{PREFIX}/samples/factor_{MODE}_{NUM_GENERATE}.npy"
+FACTOR_NAMES  = _tcfg["factor_names"]
+EPOCHS        = _tcfg["epochs"]
+NUM_TIMESTEPS = _tcfg["num_timesteps"]
+LEVY_ALPHA    = _tcfg["levy_alpha"]
+PREFIX        = _tcfg["prefix"]
+BATCH_SIZE    = _tcfg["batch_size"]
+
+NUM_GENERATE  = _scfg["num_generate"]
+FACTOR_DIM    = len(FACTOR_NAMES)
+CHECKPOINT    = f"{PREFIX}/checkpoints/factor_ep{EPOCHS:04d}.pt"
+OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
+
+
 
 
 @torch.no_grad()
@@ -133,16 +146,10 @@ if __name__ == "__main__":
     model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
 
-    scaler     = ckpt["scaler"]
-    mode       = ckpt.get("mode", "DDPM")
-    levy_alpha = ckpt["levy_alpha"]
-    gammas     = ckpt["gammas"]
-    bargammas  = ckpt["bargammas"]
-    sigmas     = ckpt["sigmas"]
-    barsigmas  = ckpt["barsigmas"]
+    scaler = ckpt["scaler"]
+    gammas, _, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
-
-    print(f"LEVY_ALPHA={levy_alpha}")
-    samples = generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler)
+    print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}")
+    samples = generate(model, gammas, sigmas, barsigmas, LEVY_ALPHA, scaler)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

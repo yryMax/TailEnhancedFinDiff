@@ -7,7 +7,7 @@ from torch.distributions import Exponential
 
 def levy_noise_schedule(alpha: float, T: int, s: float = 0.008):
     """
-    Cosine noise scheduler
+    generalized cosine noise scheduler
     :param alpha: control the tail heaviness of the noise distribution; alpha=2 corresponds to Gaussian, smaller alpha means heavier tails
     :param T: total number of time steps
     :param s: cosine schedule offset https://arxiv.org/abs/2102.09672
@@ -41,7 +41,7 @@ def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
         raw = torch.ones(shape)
         return raw.to(device) if device is not None else raw
 
-    CLAMP_A = 2000
+    CLAMP_A = 2000 # adapted from DLPM paper
     n     = math.prod(shape)
     a     = alpha / 2.0
     TH    = (torch.rand(n) * (math.pi - 0.3) - (math.pi - 0.3) / 2).double()

@@ -44,7 +44,7 @@ def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
     CLAMP_A = 2000 # adapted from DLPM paper
     n     = math.prod(shape)
     a     = alpha / 2.0
-    TH    = (torch.rand(n) * (math.pi - 0.3) - (math.pi - 0.3) / 2).double()
+    TH    = (torch.rand(n) * math.pi - math.pi / 2).double()
     W     = Exponential(torch.ones(n)).sample().squeeze().double()
 
     val0  = math.tan(math.pi * a / 2)       # beta=1
@@ -57,7 +57,7 @@ def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
     denom = cos_t / torch.tan(a * (th0 + TH)) + torch.sin(TH)
     num   = (torch.cos(aTH) + torch.sin(aTH) * tan_t
              - val0 * (torch.sin(aTH) - torch.cos(aTH) * tan_t))
-    raw   = (W / denom) * (num / W) ** (1.0 / a)
+    raw   = (W / denom) * (num / W).abs() ** (1.0 / a)
 
     raw   = torch.nan_to_num(raw, nan=1.0, posinf=CLAMP_A, neginf=0.0)
     raw   = raw.float().clamp(0.0, CLAMP_A).reshape(shape)

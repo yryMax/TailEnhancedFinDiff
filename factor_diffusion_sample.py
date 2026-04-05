@@ -10,16 +10,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT   = PREFIX + f"/checkpoints/factor_{MODE}_ep0{EPOCHS}.pt"
 NUM_GENERATE = 4096
 FACTOR_DIM   = len(FACTOR_NAMES)
-os.makedirs(f"{PREFIX}/samples", exist_ok=True)
+
 OUT_PATH     = f"{PREFIX}/samples/factor_{MODE}_{NUM_GENERATE}.npy"
 
 
-# ── Sample ─────────────────────────────────────────────────────────────────────
 @torch.no_grad()
-def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler, mode="DDPM"):
+def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
     """
-    DLPM reverse process.
-
+    DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
     1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1) — the full Lévy path.
     2. Compute Sigma_t chain:
@@ -44,25 +42,15 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler, mo
         n     = min(BATCH_SIZE, NUM_GENERATE - start)
         shape = (n, FACTOR_DIM)
 
-        # ── Step 1: pre-sample full A_{1:T} path ──────────────────────────────
-        if mode == "DDPM":
-            A = [torch.ones(shape, device=DEVICE) for _ in range(T)]
-        else:
-            A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
+        A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
 
-        # ── Step 2: compute Sigma chain ────────────────────────────────────────
         Sigmas = [sigmas[0] ** 2 * A[0]]
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        # ── Step 3: starting noise x_T ~ barsigmas[-1] * SαS (or Gaussian) ───
-        if mode == "DDPM":
-            x = barsigmas[-1] * torch.randn(*shape, device=DEVICE)
-        else:
-            a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
-            x = barsigmas[-1] * sample_sas(shape, a_init)
+        a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
+        x = barsigmas[-1] * sample_sas(a_init)
 
-        # ── Step 4: reverse denoising T-1 → 1 ─────────────────────────────────
         for t in range(T - 1, 0, -1):
             t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
             eps_pred = model(x, t_b)
@@ -141,6 +129,7 @@ def generate_conditional(model, scheduler, scaler, factor, threshold, guidance_s
 if __name__ == "__main__":
     ckpt = torch.load(CHECKPOINT, map_location=DEVICE, weights_only=False)
     print(f"Loaded checkpoint from {CHECKPOINT}, generate {NUM_GENERATE} samples...")
+    os.makedirs(f"{PREFIX}/samples", exist_ok=True)
     model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
 
@@ -152,7 +141,8 @@ if __name__ == "__main__":
     sigmas     = ckpt["sigmas"]
     barsigmas  = ckpt["barsigmas"]
 
-    print(f"MODE={mode}" + (f", LEVY_ALPHA={levy_alpha}" if mode == "DLPM" else ""))
-    samples = generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler, mode=mode)
+
+    print(f"LEVY_ALPHA={levy_alpha}")
+    samples = generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

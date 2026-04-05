@@ -1,26 +1,19 @@
 """
-Lévy noise utilities for DLPM (Denoising Lévy Probabilistic Models).
-Implements the CMS sampler and DLPM cosine noise schedule.
-Reference: https://arxiv.org/abs/2407.18609
+Code Borrowed from https://github.com/darioShar/DLPM
 """
 import math
 import torch
 from torch.distributions import Exponential
 
-CLAMP_A = 2000  # clip skewed-Lévy samples to prevent extremes
-
-
-# ── Noise schedule ──────────────────────────────────────────────────────────────
-
 def levy_noise_schedule(alpha: float, T: int, s: float = 0.008):
     """
-    DLPM scale-preserving cosine noise schedule.
-
-    Identical to DDPM cosine schedule when alpha=2.
-    Returns (gammas, bargammas, sigmas, barsigmas), all shape (T,).
-
-    Forward process:  x_t = bargammas[t] * x_0 + barsigmas[t] * eps
-    where eps ~ SαS (symmetric alpha-stable).
+    Cosine noise scheduler
+    :param alpha: control the tail heaviness of the noise distribution; alpha=2 corresponds to Gaussian, smaller alpha means heavier tails
+    :param T: total number of time steps
+    :param s: cosine schedule offset https://arxiv.org/abs/2102.09672
+    :return: (gammas, bargammas, sigmas, barsigmas), each of shape (T,) s.t.
+             x_t = bargammas[t] * x_0 + barsigmas[t] * eps, eps ~ SaS,
+             with scale-preserving constraint bargammas[t]^alpha + barsigmas[t]^alpha = 1
     """
     t          = torch.arange(T, dtype=torch.float32)
     schedule   = torch.cos((t / T + s) / (1 + s) * math.pi / 2) ** 2
@@ -34,53 +27,45 @@ def levy_noise_schedule(alpha: float, T: int, s: float = 0.008):
     barsigmas = (1 - bargammas ** alpha) ** (1.0 / alpha)
     return gammas, bargammas, sigmas, barsigmas
 
-
-# ── Lévy samplers ───────────────────────────────────────────────────────────────
-
-def _cms_sample(alpha: float, beta: float, n: int) -> torch.Tensor:
+def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
     """
-    Chambers-Mallows-Stuck algorithm for S(alpha, beta) stable distribution.
-    Returns float32 tensor of shape (n,).
-    alpha != 1 required.
+    Sample a ~ S(alpha/2, beta=1): positive right-skewed stable r.v. via the
+    Chambers-Mallows-Stuck algorithm.
+    Special case: alpha=2 (Gaussian) returns constant 1 to get N(0,1) after mixture
+    :param alpha: stability index of the target SaS distribution; a ~ S(alpha/2, 1)
+    :param shape: output shape
+    :param device: target device
+    :return: tensor of shape `shape` with positive stable samples, clamped to [0, 2000]
     """
-    TH    = (torch.rand(n) * math.pi - math.pi / 2).double()
+    if alpha == 2.0:
+        raw = torch.ones(shape)
+        return raw.to(device) if device is not None else raw
+
+    CLAMP_A = 2000
+    n     = math.prod(shape)
+    a     = alpha / 2.0
+    TH    = (torch.rand(n) * (math.pi - 0.3) - (math.pi - 0.3) / 2).double()
     W     = Exponential(torch.ones(n)).sample().squeeze().double()
 
-    val0  = beta * math.tan(math.pi * alpha / 2)
-    th0   = math.atan(val0) / alpha
+    val0  = math.tan(math.pi * a / 2)       # beta=1
+    th0   = math.atan(val0) / a
 
-    aTH   = alpha * TH
+    aTH   = a * TH
     cos_t = torch.cos(TH)
     tan_t = torch.tan(TH)
 
-    denom = cos_t / torch.tan(alpha * (th0 + TH)) + torch.sin(TH)
-    val3  = W / denom
+    denom = cos_t / torch.tan(a * (th0 + TH)) + torch.sin(TH)
     num   = (torch.cos(aTH) + torch.sin(aTH) * tan_t
              - val0 * (torch.sin(aTH) - torch.cos(aTH) * tan_t))
+    raw   = (W / denom) * (num / W) ** (1.0 / a)
 
-    # abs() before ** (1/alpha) for numerical safety; result is positive for beta=1
-    res = val3 * (num / W).abs() ** (1.0 / alpha)
-    return res.float()
+    raw   = raw.float().clamp(0.0, CLAMP_A).reshape(shape)
+    return raw.to(device) if device is not None else raw
 
 
-def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
+def sample_sas(a: torch.Tensor) -> torch.Tensor:
     """
-    Sample a_t ~ S(alpha/2, beta=1): positive right-skewed stable r.v.
-    Used as the variance multiplier:  Sigma_t = a_t * barsigmas[t]^2
-
-    Oversample by 2x then take the first n finite-positive values.
-    """
-    n   = math.prod(shape)
-    raw = _cms_sample(alpha / 2.0, 1.0, n * 2)
-    raw = torch.nan_to_num(raw, nan=1.0, posinf=CLAMP_A, neginf=0.0)
-    raw = raw.clamp(0.0, CLAMP_A)
-    a   = raw[:n].reshape(shape)
-    return a.to(device) if device is not None else a
-
-
-def sample_sas(shape: tuple, a: torch.Tensor) -> torch.Tensor:
-    """
-    Sample symmetric alpha-stable noise via the Gaussian-Lévy scale mixture:
+    Sample symmetric alpha-stable noise S(alpha, beta) via the Gaussian scale mixture:
         eps = sqrt(a) * N(0, I),   a ~ S(alpha/2, beta=1)
 
     Conditioned on a, this is just rescaled Gaussian — no special sampler needed.

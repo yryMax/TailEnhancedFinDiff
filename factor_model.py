@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-
+import yaml
 import numpy as np
 import pandas as pd
 from scipy.stats import t as scipy_t
 
-FEATURES: list[str] = ["growth", "momentum", "quality", "size", "value", "volatility"]
+with open("cfg.yaml") as f:
+    _cfg = yaml.safe_load(f)["train"]
+
+FEATURES: list[str] = [f for f in _cfg["factor_names"] if f != "market"]
 
 
 def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    """Return (R, chars) where R is the returns pivot and chars is per-factor."""
+    """
+    Pivot panel data into wide-format matrices. Dates are sorted by pivot; output may contain NaN.
+    :param df:    panel DataFrame with columns [date, csecid, returns, *FEATURES]
+    :return:      R     : (T, S) stock returns pivot
+                  chars : dict mapping each feature name to its (T, S) characteristic pivot
+    """
     R = df.pivot_table(index="date", columns="csecid", values="returns")
     chars = {f: df.pivot_table(index="date", columns="csecid", values=f) for f in FEATURES}
     return R, chars
@@ -19,13 +27,13 @@ def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
 def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Cross-sectional OLS each period: R_t = B_{t-1} * f_t + eps
-
-    Returns
-    -------
-    R : (T, S) stock returns pivot
+    :param df: the pivot return value on sectional stocks
+    :return:   R : (T, S) stock (backward) returns pivot
     F : (T-1, K+1) factor returns, columns = ['alpha', 'market', *FACTORS]
         alpha column is a constant 1.0 (intercept of the second-stage OLS in fit_beta)
+        we assume market is a factor return and the corresponding factor loader is 1
     """
+
 
     R, chars = _pivot(df)
     dates = sorted(R.index.unique())
@@ -53,13 +61,12 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
 
 def build_portsort_factors(df: pd.DataFrame, N_QUANTILES = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Portfolio-sort: long–short spread (Q_J – Q_1) per factor each period.
-
-    Returns
-    -------
-    R : (T, S) stock returns pivot
-    F : (T-1, K) factor returns, columns = FACTORS
-        No alpha column — port-sort factors are zero-investment spreads.
+    Portfolio-sort factor construction: long–short spread (top quantile – bottom quantile) per factor each period.
+    :param df:          panel DataFrame with columns [date, csecid, returns, *FEATURES]
+    :param N_QUANTILES: number of quantile buckets for sorting
+    :return:            R : (T, S) stock returns pivot
+                        F : (T-1, K) factor returns, columns = FEATURES
+                            no alpha column — port-sort factors are zero-investment spreads
     """
     R, chars = _pivot(df)
     dates = sorted(R.index.unique())
@@ -114,9 +121,10 @@ class FactorModel:
 
     def save(self, prefix: str) -> None:
         """
-        Write two files:
-          {prefix}_factors.csv   — factor return time series (human-readable)
-          {prefix}_model.npz     — beta, res_std, residuals + scalar config
+        Persist the fitted model to disk.
+        :param prefix: output directory; two files are written:
+                       {prefix}/factors.csv — factor return time series (human-readable)
+                       {prefix}/model.npz   — beta, res_std, residuals and scalar metadata
         """
         os.makedirs(prefix, exist_ok=True)
 
@@ -137,8 +145,12 @@ class FactorModel:
         print(f"Model saved to {prefix}/factors.csv and {prefix}/model.npz")
 
     @classmethod
-    def load(cls, prefix: str) -> "FactorModel":
-        """Load a model previously saved with .save()."""
+    def load(cls, prefix: str) -> FactorModel:
+        """
+        Load a model previously saved with .save().
+        :param prefix: directory containing factors.csv and model.npz
+        :return:  reconstructed FactorModel instance
+        """
         F = pd.read_csv(f"{prefix}/factors.csv", index_col=0, parse_dates=True)
 
         npz = np.load(f"{prefix}/model.npz", allow_pickle=True)
@@ -155,12 +167,14 @@ class FactorModel:
 
 def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
     """
-    Fit per-stock OLS betas: r_s = F @ beta_s + eps_s
-
-    F is aligned to dates (T, K); R is stock returns (T', S).
-    The function handles the next-date shift: F at t predicts R at t+1.
-
-    Returns a FactorModel with beta (K, S), res_std (S,), residuals (T, S).
+    Fit per-stock OLS betas: r_s = F @ beta_s + eps_s.
+    Handles the next-date shift: factor F at t predicts return R at t+1.
+    Residual distribution is fitted to a Student-t to capture fat tails, the df id get from
+    experimental data.
+    :param F:    (T, K) factor returns
+    :param R:    (T, S) stock returns pivot
+    :param path: data source path stored in the returned model for traceability
+    :return:     FactorModel with beta (K, S), res_std (S,), residuals (T, S)
     """
     date_all = sorted(R.index.unique())
     next_date = {date_all[i]: date_all[i + 1] for i in range(len(date_all) - 1)}
@@ -200,16 +214,11 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
 
 def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     """
-    Reconstruct stock returns from factor samples.
-
-    Parameters
-    ----------
-    model : FactorModel
-    fs    : (N, K) array of factor samples — same column order as model.F
-
-    Returns
-    -------
-    R_gen : (N, S) reconstructed stock returns
+    Reconstruct stock returns from factor samples via R = F @ beta + idiosyncratic noise.
+    Idiosyncratic noise is drawn from a scaled Student-t fitted to model residuals.
+    :param model: fitted FactorModel
+    :param fs:    (N, K) factor samples — column order must match model.F
+    :return:      (N, S) reconstructed stock returns
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta

@@ -48,46 +48,22 @@ After running `factor_model.py`, the derived folder should be structured as foll
 │       └── samples/ # generated factor return samples
 ```
 
-The stock returns can be constructed in memory via sampled factor and factor model.
+
 
 
 ### TRAINING
 
-Edit `cfg.yaml` to configure hyperparameters before running:
+1. Edit `cfg.yaml` to configure hyperparameters before running
 
-```yaml
-train:
-  factor_names: [market, growth, momentum, quality, size, value, volatility]
-  prefix: model/regression   # output directory for checkpoints and factors.csv
-  levy_alpha: 1.9            # stability index; set to 2.0 to recover standard DDPM
-  epochs: 100
-  num_timesteps: 100
-  mc_outer: 1   # outer draws of the Lévy subordinator a ~ S(alpha/2, 1); median taken across these
-  mc_inner: 1   # inner draws per outer a; mean taken across these (same a, different Gaussian z)
+2. run `python factor_model.py` to fit the betas and residuals according to the provided parquet,
+do this for training data and test data separately.
 
-sample:
-  num_generate: 4096
-```
+3. run `python factor_diffusion_train.py` to train the diffusion model
+
+Some Tips on hyperparameters
+- levy_alpha
 
 
-### RUNNING
 
-```bash
-# 1. Fit factor model and save factor return series
-python factor_model.py
-
-# 2. Train diffusion model on factor returns
-python factor_diffusion_train.py
-
-# 3. Generate synthetic factor samples
-python factor_diffusion_sample.py
-```
-
-Outputs are written to `{prefix}/` (`model/regression/` by default):
-
-| File | Description |
-|------|-------------|
-| `factors.csv` | Fitted factor return time series |
-| `model.npz` | OLS betas and residual parameters |
-| `checkpoints/factor_ep{N:04d}.pt` | Diffusion model checkpoint |
-| `samples/factor_{N}.npy` | Generated factor samples |
+### SAMPLING
+The stock returns can be constructed in memory via sampled factor and factor model.

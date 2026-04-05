@@ -21,7 +21,7 @@ BATCH_SIZE    = _tcfg["batch_size"]
 
 NUM_GENERATE  = _scfg["num_generate"]
 FACTOR_DIM    = len(FACTOR_NAMES)
-CHECKPOINT    = f"{PREFIX}/checkpoints/factor_ep{EPOCHS:04d}.pt"
+CHECKPOINT    = f"{PREFIX}/checkpoints/001.pt"
 OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 

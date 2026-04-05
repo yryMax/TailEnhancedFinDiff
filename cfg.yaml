@@ -1,6 +1,6 @@
 train:
   factor_names:  [market, growth, momentum, quality, size, value, volatility] # name of characteristics that are expected to calculate the factor returns
-  epochs:        100 # number of epochs to train the model
+  epochs:        200 # number of epochs to train the model
   batch_size:    64 # batch size for training
   lr:            1.0e-4 # learning rate for the adam optimizer
   num_timesteps: 100 # number of diffusion steps

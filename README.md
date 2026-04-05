@@ -11,10 +11,10 @@ conda activate diffusion_factor_model
 ```
 .
 ├── cfg.yaml                      # all (hyper)parameters and config settings
-├── factor_model.py               # cross-sectional OLS factor model (fit + save/load)
+├── factor_model.py               # convert between stock returns and factor returns; fit the systematic part and idiosyncratic residuals
 ├── factor_diffusion_levy.py      # Lévy noise schedule and SαS sampling primitives
-├── factor_diffusion_train.py     # DLPM training (FactorDenoiser + dlpm_loss)
-├── factor_diffusion_sample.py    # reverse diffusion sampling (unconditional + conditional)
+├── factor_diffusion_train.py     # diffusion training
+├── factor_diffusion_sample.py    # diffusion sampling
 │
 ├── factor_evaluation.ipynb       # factor-level evaluation (moments, KDE, Q-Q, correlation)
 ├── stock_evaluation.ipynb        # stock-level evaluation (return reconstruction, dispersion)
@@ -23,28 +23,26 @@ conda activate diffusion_factor_model
 │   ├── statistic.py              # distributional statistics (covariance, Frobenius, ...)
 │   ├── statistic_temporal.py     # temporal / autocorrelation metrics
 │   └── risk.py                   # portfolio risk metrics
-│
-├── data/                         # input panel data (not tracked)
-│   ├── train24y.parquet
-│   └── test1y.parquet
-├── model/                        # fitted model outputs (not tracked)
-│   └── regression/
-│       ├── factors.csv
-│       ├── model.npz
-│       ├── checkpoints/
-│       └── samples/
 ├── assets/                       # figures and result exports
 └── legacy/                       # earlier experiments (not part of main pipeline)
 ```
 
 ### DATA PREPROCESSING
+The raw data must be in .parquet format with train/data splits.
 
-Place panel data parquets under `data/`:
+Each 
+
 
 ```
-data/
-  train24y.parquet   # columns: date, csecid, returns, <factor_names>
-  test1y.parquet
+├── data/
+│   ├── train24y.parquet
+│   └── test1y.parquet
+├── model/
+│   └── regression/
+│       ├── factors.csv
+│       ├── model.npz
+│       ├── checkpoints/
+│       └── samples/
 ```
 
 ### CONFIGURATION

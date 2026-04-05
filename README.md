@@ -30,19 +30,22 @@ conda activate diffusion_factor_model
 ### DATA PREPROCESSING
 The raw data must be in .parquet format with train/data splits.
 
-Each 
+Each .parquet must contain rows with features: 
+- returns
+- stock_id (cse_cid)
+- the characteristics that you are interested in (e.g. size, value, momentum, ...)
 
-
+After running `factor_model.py`, the derived folder should be structured as follows
 ```
 ├── data/
-│   ├── train24y.parquet
-│   └── test1y.parquet
+│   ├── train24y.parquet # training dataset that the user prepared
+│   └── test1y.parquet # test dataset that the user prepared
 ├── model/
-│   └── regression/
-│       ├── factors.csv
-│       ├── model.npz
-│       ├── checkpoints/
-│       └── samples/
+│   └── regression/   # user defined prefix
+│       ├── factors.csv # factor returns as training data for the diffusion model
+│       ├── model.npz # contains the requied data to convert between stock returns and factor returns (OLS betas and residual parameters)
+│       ├── checkpoints/ # saved diffusion model that generate factor returns
+│       └── samples/ # generated factor return samples
 ```
 
 ### CONFIGURATION

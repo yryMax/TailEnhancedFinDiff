@@ -2,6 +2,7 @@ trigger:
   branches:
     include:
       - dev
+      - main
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -28,3 +29,20 @@ steps:
       databricks fs cp ./factor_diffusion_train.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_train.py --overwrite
       databricks fs cp ./factor_diffusion_sample.py dbfs:/FileStore/interns/renyi/code/factor_diffusion_sample.py --overwrite
     displayName: 'Sync diffusion scripts'
+
+  - task: CopyFiles@2
+    displayName: 'Stage artifacts'
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    inputs:
+      contents: |
+        data/*.parquet
+        model.zip
+      targetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish data & model artifacts'
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    inputs:
+      pathToPublish: '$(Build.ArtifactStagingDirectory)'
+      artifactName: 'data-and-model'
+      publishLocation: 'Container'

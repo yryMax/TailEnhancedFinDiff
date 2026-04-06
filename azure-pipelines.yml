@@ -32,7 +32,6 @@ steps:
 
   - task: CopyFiles@2
     displayName: 'Stage artifacts'
-    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
     inputs:
       contents: |
         data/*.parquet
@@ -41,7 +40,6 @@ steps:
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish data & model artifacts'
-    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
     inputs:
       pathToPublish: '$(Build.ArtifactStagingDirectory)'
       artifactName: 'data-and-model'

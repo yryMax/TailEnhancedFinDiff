@@ -55,6 +55,7 @@ def _make_hi_cond(q_norm, idx):
     return cond_fn
 
 
+
 def test_conditional_single(artifacts):
     model, gammas, bargammas, sigmas, barsigmas, scaler = artifacts
 

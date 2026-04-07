@@ -27,11 +27,12 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 
 @torch.no_grad()
-def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
+def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
+             cond_fn=None, guidance_scale=1.0):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
-    1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1) — the full Lévy path.
+    1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1)
     2. Compute Sigma_t chain:
            Sigma_0 = sigma_0^2 * A_0
            Sigma_t = sigma_t^2 * A_t + gamma_t^2 * Sigma_{t-1}
@@ -41,9 +42,17 @@ def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
            mean     = (x_t - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
            variance = Gamma_t * Sigma_{t-1}
            x_{t-1}  = mean + sqrt(variance) * N(0,I)
+
+    Optional DLPM-correct gradient guidance:
+        cond_fn(x0_hat: Tensor[n,D]) -> scalar loss
+            Receives the Tweedie x0 estimate; returns a scalar loss (higher = farther from target).
+        The posterior mean is corrected by:
+            mean -= guidance_scale * var * ∂loss/∂x_t
+        where var = Gamma_t * Sigma_{t-1} provides the proper Bayesian scaling.
     """
     T = len(gammas)
     gammas    = gammas.to(DEVICE)
+    bargammas = bargammas.to(DEVICE)
     sigmas    = sigmas.to(DEVICE)
     barsigmas = barsigmas.to(DEVICE)
 
@@ -61,6 +70,7 @@ def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
         a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
+        # barsigmas[-1] is nearly 1 because of scale preserving
         x = barsigmas[-1] * sample_sas(a_init)
 
         for t in range(T - 1, 0, -1):
@@ -72,13 +82,22 @@ def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
 
             # posterior contraction factor
             Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
-            Gamma_t = Gamma_t.clamp(0.0, 1.0)
 
             # posterior mean
             mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
 
             # posterior variance (Gaussian, conditioned on A)
             var = (Gamma_t * Sigma_t1).clamp(min=0.0)
+
+            # DLPM-correct guidance: shift posterior mean by -s * var * ∂loss/∂x_t
+            # var provides natural Bayesian scaling; chain rule through x0_hat is exact
+            if cond_fn is not None and t > 1:
+                with torch.enable_grad():
+                    x_g    = x.detach().requires_grad_(True)
+                    x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
+                    loss   = cond_fn(x0_hat)
+                    grad   = torch.autograd.grad(loss, x_g)[0]
+                mean = mean - guidance_scale * var * grad.detach()
 
             if t > 1:
                 x = mean + var.sqrt() * torch.randn_like(x)
@@ -89,53 +108,6 @@ def generate(model, gammas, sigmas, barsigmas, levy_alpha, scaler):
     return scaler.inverse_transform(torch.cat(batches).numpy())
 
 
-def generate_conditional(model, scheduler, scaler, factor, threshold, guidance_scale=200.0):
-    model.eval()
-    scheduler.set_timesteps(scheduler.config.num_train_timesteps)
-
-    factor_idx     = FACTOR_NAMES.index(factor)
-    dummy          = np.zeros((1, FACTOR_DIM))
-    dummy[0, factor_idx] = threshold
-    threshold_norm = float(scaler.transform(dummy)[0, factor_idx])
-
-    batches = []
-    for start in range(0, NUM_GENERATE, BATCH_SIZE):
-        n = min(BATCH_SIZE, NUM_GENERATE - start)
-        # start from pure noise
-        x = torch.randn(n, FACTOR_DIM, device=DEVICE)
-        # for each timestep
-        for t_val in scheduler.timesteps:
-            # enable gradient tracking for x
-            x = x.detach().requires_grad_(True)
-
-            # broadcast timestep to batch
-            t_b = torch.full((n,), t_val, dtype=torch.long, device=DEVICE)
-
-            # predict noise (detach so gradient only flows through direct x → x0_hat path)
-            with torch.no_grad():
-                noise_pred = model(x, t_b)
-
-            alpha_bar   = scheduler.alphas_cumprod[t_val].to(DEVICE)
-
-            # estimate x0 (gradient flows through x only, not through the model)
-            x0_hat    = (x - (1 - alpha_bar).sqrt() * noise_pred) / alpha_bar.sqrt()
-
-            # panalty if the volatility is smaller than the threshold
-            cond_loss = torch.relu(threshold_norm - x0_hat[:, factor_idx]).pow(2).mean()
-
-            # where the sample should go for larger panalty.
-            grad      = torch.autograd.grad(cond_loss, x)[0]
-
-            with torch.no_grad():
-                # predict noise and compute previous sample
-                x = scheduler.step(noise_pred, t_val, x.detach()).prev_sample
-                grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                # shift the sample toward the direction that decrease the panalty.
-                x = x - guidance_scale * grad / grad_norm
-
-        batches.append(x.detach().cpu())
-
-    return scaler.inverse_transform(torch.cat(batches).numpy())
 
 
 if __name__ == "__main__":
@@ -146,9 +118,9 @@ if __name__ == "__main__":
     model.load_state_dict(ckpt["model_state"])
 
     scaler = ckpt["scaler"]
-    gammas, _, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
+    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}")
-    samples = generate(model, gammas, sigmas, barsigmas, LEVY_ALPHA, scaler)
+    samples = generate(model, gammas, bargammas, sigmas, barsigmas, LEVY_ALPHA, scaler)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

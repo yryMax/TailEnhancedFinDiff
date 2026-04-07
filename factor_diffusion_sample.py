@@ -28,7 +28,7 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 @torch.no_grad()
 def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
-             cond_fn=None, guidance_scale=1.0):
+             cond_fn=None, guidance_scale=1.0, num_samples=None):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
@@ -56,11 +56,14 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
     sigmas    = sigmas.to(DEVICE)
     barsigmas = barsigmas.to(DEVICE)
 
+    if num_samples is None:
+        num_samples = NUM_GENERATE
+
     model.eval()
     batches = []
 
-    for start in range(0, NUM_GENERATE, BATCH_SIZE):
-        n     = min(BATCH_SIZE, NUM_GENERATE - start)
+    for start in range(0, num_samples, BATCH_SIZE):
+        n     = min(BATCH_SIZE, num_samples - start)
         shape = (n, FACTOR_DIM)
 
         A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
@@ -108,6 +111,65 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
     return scaler.inverse_transform(torch.cat(batches).numpy())
 
 
+
+
+def generate_rejection(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
+                       cond_fn, num_samples=None, guidance_scale=1.0,
+                       hard=True, max_batches=500):
+    """
+    Exact conditional sampling via rejection sampling on top of generate().
+
+    Each iteration calls generate(..., num_samples=BATCH_SIZE, cond_fn=None) to get
+    an unconditional batch, then accepts each sample based on cond_fn:
+      hard=True  (default): accept if cond_fn(x0[i:i+1]) < 1e-8
+                            (relu hinge loss == 0 iff constraint satisfied)
+      hard=False           : accept with probability exp(-guidance_scale * loss_i)
+                            exact samples from p_uncon(x0) * exp(-guidance_scale * L(x0))
+
+    cond_fn called with n=1 so .mean() in the closure returns the per-sample value.
+    Returns np.ndarray (num_samples, FACTOR_DIM) in original space.
+    """
+    if num_samples is None:
+        num_samples = NUM_GENERATE
+
+    accepted = []
+    n_tried  = 0
+    args     = (model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler)
+
+    for _ in range(max_batches):
+        if len(accepted) >= num_samples:
+            break
+
+        batch_np = generate(*args, num_samples=BATCH_SIZE)
+        batch_t  = torch.tensor(scaler.transform(batch_np), dtype=torch.float32)
+
+        n_tried += len(batch_t)
+        for i in range(len(batch_t)):
+            xi     = batch_t[i:i+1]
+            loss_i = float(cond_fn(xi))
+
+            if hard:
+                accept = loss_i < 1e-8
+            else:
+                accept = np.random.rand() < np.exp(-guidance_scale * loss_i)
+
+            if accept:
+                accepted.append(batch_np[i])
+            if len(accepted) >= num_samples:
+                break
+
+    n_got = len(accepted)
+    rate  = n_got / n_tried if n_tried > 0 else 0.0
+    if n_got < num_samples:
+        import warnings
+        warnings.warn(
+            f"generate_rejection: only {n_got}/{num_samples} samples after {n_tried} tries "
+            f"(rate={rate:.4f}). Increase max_batches or relax the condition."
+        )
+    else:
+        print(f"  [rejection] accepted {n_got}/{n_tried}  (rate={rate:.4f})")
+
+    return np.stack(accepted[:num_samples])
 
 
 if __name__ == "__main__":

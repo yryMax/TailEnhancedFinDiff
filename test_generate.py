@@ -12,7 +12,6 @@ from factor_diffusion_sample import (
 
 N_SAMPLES = 64
 VOL_IDX   = FACTOR_NAMES.index("volatility")
-THRESHOLD = 0.001
 
 
 @pytest.fixture(scope="module")

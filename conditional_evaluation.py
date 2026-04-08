@@ -8,7 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-
+from scipy.stats import gaussian_kde
 from factor_diffusion_train import FactorDenoiser
 from factor_diffusion_levy import levy_noise_schedule
 from factor_diffusion_sample import (
@@ -16,10 +16,10 @@ from factor_diffusion_sample import (
     LEVY_ALPHA, NUM_TIMESTEPS, generate, generate_rejection,
 )
 
-N_REF      = 512    # uncon samples to estimate q1
-N_COND     = 512     # conditional samples for each method
+N_REF      = 512
+N_COND     = 512
 VOL_IDX    = FACTOR_NAMES.index("volatility")
-GUIDANCE_S = 0.5
+GUIDANCE_S = 1.0
 SAVE_PATH  = "conditional_evaluation.png"
 
 # ── load model ────────────────────────────────────────────────────────────────
@@ -64,7 +64,6 @@ for label, s in [("uncon", uncon[:N_COND]), ("rejection", rej), ("guidance", gui
           f"pct satisfying (≤q1)={pct_ok:.1f}%")
 
 # ── plot ──────────────────────────────────────────────────────────────────────
-from scipy.stats import gaussian_kde
 
 fig = plt.figure(figsize=(14, 11))
 gs  = gridspec.GridSpec(2, 2, height_ratios=[2, 1.2], hspace=0.5, wspace=0.35)

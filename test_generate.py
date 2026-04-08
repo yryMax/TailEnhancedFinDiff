@@ -54,6 +54,21 @@ def _make_hi_cond(q_norm, idx):
     return cond_fn
 
 
+def test_demo(artifacts):
+    model, gammas, bargammas, sigmas, barsigmas, scaler = artifacts
+
+    with patch("factor_diffusion_sample.NUM_GENERATE", N_SAMPLES):
+        uncon = generate(model, gammas, bargammas, sigmas, barsigmas,
+                         LEVY_ALPHA, scaler, cond_fn=None)
+
+
+    q1  = np.percentile(uncon, 1,  axis=0)
+    q1_norm = _to_norm(scaler, q1[VOL_IDX], 0)
+    lo = generate(model, gammas, bargammas, sigmas, barsigmas,
+                  LEVY_ALPHA, scaler,
+                  cond_fn=_make_lo_cond(q1_norm, VOL_IDX), guidance_scale=5.0, plot_var=True)
+
+    print(f"Demo: vol q1={q1[VOL_IDX]:.4f}  lo mean={lo[:, VOL_IDX].mean():.4f}  ")
 
 def test_conditional_single(artifacts):
     model, gammas, bargammas, sigmas, barsigmas, scaler = artifacts

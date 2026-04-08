@@ -28,7 +28,7 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 @torch.no_grad()
 def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
-             cond_fn=None, guidance_scale=1.0, num_samples=None):
+             cond_fn=None, guidance_scale=1.0, num_samples=None, plot_var=True):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
@@ -61,6 +61,7 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
 
     model.eval()
     batches = []
+    var_history = [] if plot_var else None  # list of (t, mean_var, max_var) for first batch
 
     for start in range(0, num_samples, BATCH_SIZE):
         n     = min(BATCH_SIZE, num_samples - start)
@@ -92,6 +93,9 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
             # posterior variance (Gaussian, conditioned on A)
             var = (Gamma_t * Sigma_t1).clamp(min=0.0)
 
+            if var_history is not None and start == 0:
+                var_history.append((t, float(var.mean()), float(var.max())))
+
             # DLPM-correct guidance: shift posterior mean by -s * var * ∂loss/∂x_t
             # var provides natural Bayesian scaling; chain rule through x0_hat is exact
             if cond_fn is not None and t > 1:
@@ -108,6 +112,26 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
                 x = mean   # no noise at last step
 
         batches.append(x.cpu())
+
+    if plot_var and var_history:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        ts   = [v[0] for v in var_history]
+        means = [v[1] for v in var_history]
+        maxs  = [v[2] for v in var_history]
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(ts, means, label="mean var")
+        ax.plot(ts, maxs,  label="max var", alpha=0.6)
+        ax.set_xlabel("timestep t  (T-1 → 1)")
+        ax.set_ylabel("var = Gamma_t * Sigma_{t-1}")
+        ax.set_title("Posterior variance across reverse timesteps")
+        ax.legend()
+        ax.invert_xaxis()   # show T-1 on left, 1 on right
+        plt.tight_layout()
+        plt.savefig("var_history.png", dpi=150)
+        print("Saved var_history.png")
+
     return scaler.inverse_transform(torch.cat(batches).numpy())
 
 

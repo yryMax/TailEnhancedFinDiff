@@ -1,7 +1,3 @@
-"""
-Conditional generation evaluation: volatility < 1% quantile
-Compares rejection sampling (exact) vs guidance (approximate) on 64 samples.
-"""
 import numpy as np
 import torch
 import matplotlib
@@ -64,7 +60,6 @@ for label, s in [("uncon", uncon[:N_COND]), ("rejection", rej), ("guidance", gui
           f"pct satisfying (≤q1)={pct_ok:.1f}%")
 
 # ── plot ──────────────────────────────────────────────────────────────────────
-
 fig = plt.figure(figsize=(14, 11))
 gs  = gridspec.GridSpec(2, 2, height_ratios=[2, 1.2], hspace=0.5, wspace=0.35)
 

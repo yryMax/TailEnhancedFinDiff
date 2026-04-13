@@ -81,16 +81,17 @@ color_map = {
     "guidance":     COLORS["guidance"],
 }
 
-def _plot_vol_panel(ax, xlim, title_suffix):
-    for label, data in datasets.items():
-        clipped = data[(data >= xlim[0]) & (data <= xlim[1])]
+def _plot_vol_panel(ax, xlim, title_suffix, datasets, color_map, fidx=None):
+    for label, data, color in datasets:
+        col = data[:, fidx] if (data.ndim == 2 and fidx is not None) else data
+        clipped = col[(col >= xlim[0]) & (col <= xlim[1])]
         if len(clipped) < 2:
             continue
         ax.hist(clipped, bins=BINS, density=True, alpha=ALPHA,
-                color=color_map[label], label=label, edgecolor="white", linewidth=0.4)
-        kde = gaussian_kde(data, bw_method=0.3)
+                color=color, label=label, edgecolor="white", linewidth=0.4)
+        kde = gaussian_kde(col, bw_method=0.3)
         x_grid = np.linspace(xlim[0], xlim[1], 400)
-        ax.plot(x_grid, kde(x_grid), color=color_map[label], linewidth=2)
+        ax.plot(x_grid, kde(x_grid), color=color, linewidth=2)
 
     ax.axvline(q1, color="black", linestyle="--", linewidth=1.5,
                label=f"q1 = {q1:.4f}")
@@ -99,13 +100,14 @@ def _plot_vol_panel(ax, xlim, title_suffix):
     ax.set_xlim(xlim)
     ax.set_title(title_suffix)
     ax.legend(fontsize=8, framealpha=0.9)
-    for i, (label, data) in enumerate(datasets.items()):
-        pct     = (data <= q1).mean() * 100
-        visible = ((data >= xlim[0]) & (data <= xlim[1])).sum()
+    for i, (label, data, color) in enumerate(datasets):
+        col     = data[:, fidx] if (data.ndim == 2 and fidx is not None) else data
+        pct     = (col <= q1).mean() * 100
+        visible = ((col >= xlim[0]) & (col <= xlim[1])).sum()
         ax.text(0.02, 0.97 - i * 0.10,
-                f"{label}: {pct:.0f}% ≤ q1  ({visible}/{len(data)} visible)",
+                f"{label}: {pct:.0f}% ≤ q1  ({visible}/{len(col)} visible)",
                 transform=ax.transAxes, fontsize=8,
-                color=color_map[label], va="top")
+                color=color, va="top")
 
 SUPTITLE = (
     f"Conditional generation: volatility < q1 = {q1:.5f}\n"
@@ -117,7 +119,8 @@ sigma_ref = uncon[:, VOL_IDX].std()
 zoom_lim  = (q1 - 4 * sigma_ref, q1 + 4 * sigma_ref)
 fig1, ax_zoom = plt.subplots(figsize=(7, 5))
 _plot_vol_panel(ax_zoom, zoom_lim,
-                f"Zoomed (uncon/rejection range)\ncond = vol < q1, n={N_COND}")
+                f"Zoomed (uncon/rejection range)\ncond = vol < q1, n={N_COND}",
+                datasets, color_map)
 fig1.suptitle(SUPTITLE, fontsize=10)
 fig1.tight_layout()
 plt.show()
@@ -128,7 +131,8 @@ full_lim = (all_data.min() - abs(all_data.min()) * 0.05,
             all_data.max() + abs(all_data.max()) * 0.05)
 fig2, ax_full = plt.subplots(figsize=(7, 5))
 _plot_vol_panel(ax_full, full_lim,
-                f"Full range (all samples visible)\nguidance scale={GUIDANCE_S}")
+                f"Full range (all samples visible)\nguidance scale={GUIDANCE_S}",
+                datasets, color_map)
 fig2.suptitle(SUPTITLE, fontsize=10)
 fig2.tight_layout()
 plt.show()

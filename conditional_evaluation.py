@@ -2,12 +2,28 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
-from factor_diffusion_train import FactorDenoiser
+from factor_diffusion_train import FactorDenoiser, FACTOR_NAMES
 from factor_diffusion_levy import levy_noise_schedule
-from factor_diffusion_sample import (
-    CHECKPOINT, DEVICE, FACTOR_NAMES, FACTOR_DIM,
-    LEVY_ALPHA, NUM_TIMESTEPS, generate, generate_rejection,
-)
+from factor_diffusion_sample import generate, generate_rejection
+import yaml
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+with open("cfg.yaml") as f:
+    _all_cfg = yaml.safe_load(f)
+    _tcfg    = _all_cfg["train"]
+    _scfg    = _all_cfg["sample"]
+
+NUM_TIMESTEPS = _tcfg["num_timesteps"]
+LEVY_ALPHA    = _tcfg["levy_alpha"]
+PREFIX        = _tcfg["prefix"]
+BATCH_SIZE    = _tcfg["batch_size"]
+FACTOR_NAMES  = _tcfg["factor_names"]
+NUM_GENERATE  = _scfg["num_generate"]
+FACTOR_DIM    = len(_tcfg["factor_names"])
+CHECKPOINT    = f"{PREFIX}/checkpoints/factor_DLPM_ep0200.pt"
+OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 N_COND     = 128
 VOL_IDX    = FACTOR_NAMES.index("volatility")

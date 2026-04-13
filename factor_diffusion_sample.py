@@ -12,15 +12,13 @@ with open("cfg.yaml") as f:
     _tcfg    = _all_cfg["train"]
     _scfg    = _all_cfg["sample"]
 
-FACTOR_NAMES  = _tcfg["factor_names"]
-EPOCHS        = _tcfg["epochs"]
 NUM_TIMESTEPS = _tcfg["num_timesteps"]
 LEVY_ALPHA    = _tcfg["levy_alpha"]
 PREFIX        = _tcfg["prefix"]
 BATCH_SIZE    = _tcfg["batch_size"]
 
 NUM_GENERATE  = _scfg["num_generate"]
-FACTOR_DIM    = len(FACTOR_NAMES)
+FACTOR_DIM    = len(_tcfg["factor_names"])
 CHECKPOINT    = f"{PREFIX}/checkpoints/factor_DLPM_ep0200.pt"
 OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
@@ -28,7 +26,7 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 @torch.no_grad()
 def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
-             cond_fn=None, guidance_scale=1.0, num_samples=None):
+             cond_fn=None, guidance_scale=5.0, num_samples=None):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:

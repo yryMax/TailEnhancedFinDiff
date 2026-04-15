@@ -224,7 +224,7 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     systematic = fs @ model.beta
     noise = np.random.standard_t(model.res_df, size=(N, S)) * np.sqrt((model.res_df - 2) / model.res_df)
     idiosyncratic = noise * model.res_std
-    return systematic
+    return systematic + idiosyncratic
 
 
 def save_model(model: FactorModel, prefix: str) -> None:

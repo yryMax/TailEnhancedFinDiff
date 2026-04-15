@@ -8,7 +8,8 @@ from torch.distributions import Exponential
 def levy_noise_schedule(alpha: float, T: int, s: float = 0.008):
     """
     generalized cosine noise scheduler
-    :param alpha: control the tail heaviness of the noise distribution; alpha=2 corresponds to Gaussian, smaller alpha means heavier tails
+    :param alpha: control the tail heaviness of the noise distribution;
+    alpha=2 corresponds to Gaussian, smaller alpha means heavier tails
     :param T: total number of time steps
     :param s: cosine schedule offset https://arxiv.org/abs/2102.09672
     :return: (gammas, bargammas, sigmas, barsigmas), each of shape (T,) s.t.

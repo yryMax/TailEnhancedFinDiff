@@ -97,16 +97,12 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
 
             # DLPM-correct guidance: shift posterior mean by -s * var * ∂loss/∂x_t
             # var provides natural Bayesian scaling
-            if cond_fn is not None and 1 < t < T // 2:
+            if cond_fn is not None and 1 < t < T // 4:
                 with torch.enable_grad():
                     x_g    = x.detach().requires_grad_(True)
                     x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
                     loss   = cond_fn(x0_hat).sum()
                     grad   = torch.autograd.grad(loss, x_g)[0]
-                # soft norm cap: normalise only when norm > 1, otherwise keep as-is.
-                # combined with squared loss this gives gradient ≈ 0 near the
-                # threshold (no overshoot) while bounding large-violation steps
-                # (no heavy-tail explosion from uncapped gradients).
                 grad_norm = grad.norm(dim=1, keepdim=True).clamp(min=1e-8)
                 grad = grad / grad_norm.clamp(min=1.0)
                 if start == 0:

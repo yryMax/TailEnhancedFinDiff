@@ -122,8 +122,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
 
 
 
-def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=1.0,
-                       hard=True, max_batches=50000):
+def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=1.0, max_batches=50000):
     """
     Exact conditional sampling via rejection sampling on top of generate().
 
@@ -155,10 +154,7 @@ def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=
             xi     = batch_t[i:i+1]
             loss_i = float(cond_fn(xi))
 
-            if hard:
-                accept = loss_i < 1e-8
-            else:
-                accept = np.random.rand() < np.exp(-guidance_scale * loss_i)
+            accept = np.random.rand() < np.exp(-guidance_scale * loss_i)
 
             if accept:
                 accepted.append(batch_np[i])

@@ -23,8 +23,9 @@ class FactorSampler(ABC):
         pass
 
 class ResampleSampler(FactorSampler):
-    def __init__(self, train_factors: pd.DataFrame, guidance_scale: float = 1.0, rng: np.random.Generator = None):
+    def __init__(self, train_factors: pd.DataFrame, scaler, guidance_scale: float = 1.0, rng: np.random.Generator = None):
         self.factors = train_factors.drop(columns=["alpha"]).values if "alpha" in train_factors.columns else train_factors.values
+        self.scaler = scaler
         self.batch_size = 1024
         self.max_batches = 500
         self.guidance_scale = guidance_scale
@@ -36,13 +37,16 @@ class ResampleSampler(FactorSampler):
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         accepted = []
+        _mean  = torch.tensor(self.scaler.mean_,  dtype=torch.float32)
+        _scale = torch.tensor(self.scaler.scale_, dtype=torch.float32)
         for _ in range(self.max_batches):
             if len(accepted) >= num_generate:
                 break
             candidates = self.generate(self.batch_size)
             for i in range(len(candidates)):
                 xi = torch.tensor(candidates[i:i+1], dtype=torch.float32)
-                loss_i = float(cond_fn(xi))
+                xi_norm = (xi - _mean) / _scale
+                loss_i = float(cond_fn(xi_norm))
 
                 accept = self.rng.random() < np.exp(-self.guidance_scale * loss_i)
 
@@ -53,10 +57,11 @@ class ResampleSampler(FactorSampler):
         return np.stack(accepted[:num_generate]) if accepted else np.array([])
 
 class GaussianSampler(FactorSampler):
-    def __init__(self, train_factors: pd.DataFrame, guidance_scale: float = 1.0, rng: np.random.Generator = None):
+    def __init__(self, train_factors: pd.DataFrame, scaler, guidance_scale: float = 1.0, rng: np.random.Generator = None):
         factors = train_factors.drop(columns=["alpha"]) if "alpha" in train_factors.columns else train_factors
         self.mean = factors.mean().values
         self.cov = np.cov(factors.values, rowvar=False)
+        self.scaler = scaler
         self.batch_size = 1024
         self.max_batches = 500
         self.guidance_scale = guidance_scale
@@ -67,6 +72,8 @@ class GaussianSampler(FactorSampler):
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         accepted = []
+        _mean  = torch.tensor(self.scaler.mean_,  dtype=torch.float32)
+        _scale = torch.tensor(self.scaler.scale_, dtype=torch.float32)
 
         for _ in range(self.max_batches):
             if len(accepted) >= num_generate:
@@ -75,7 +82,8 @@ class GaussianSampler(FactorSampler):
             candidates = self.generate(self.batch_size)
             for i in range(len(candidates)):
                 xi = torch.tensor(candidates[i:i+1], dtype=torch.float32)
-                loss_i = float(cond_fn(xi))
+                xi_norm = (xi - _mean) / _scale
+                loss_i = float(cond_fn(xi_norm))
 
                 accept = self.rng.random() < np.exp(-self.guidance_scale * loss_i)
 

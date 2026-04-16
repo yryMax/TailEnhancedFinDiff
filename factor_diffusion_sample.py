@@ -103,8 +103,12 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
                     x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
                     loss   = cond_fn(x0_hat).sum()
                     grad   = torch.autograd.grad(loss, x_g)[0]
-                # per-sample unit-norm clip: preserve direction, bound magnitude
-                grad = grad / grad.norm(dim=1, keepdim=True).clamp(min=1e-8) # zero - aware
+                # soft norm cap: normalise only when norm > 1, otherwise keep as-is.
+                # combined with squared loss this gives gradient ≈ 0 near the
+                # threshold (no overshoot) while bounding large-violation steps
+                # (no heavy-tail explosion from uncapped gradients).
+                grad_norm = grad.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                grad = grad / grad_norm.clamp(min=1.0)
                 if start == 0:
                     grad_history.append((t, float(grad.mean()), float(grad.max())))
                 mean = mean - guidance_scale * var * grad.detach()

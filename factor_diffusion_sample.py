@@ -25,8 +25,7 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 
 @torch.no_grad()
-def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
-             cond_fn=None, guidance_scale=5.0, num_samples=None):
+def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
@@ -48,6 +47,7 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
             mean -= guidance_scale * var * ∂loss/∂x_t
         where var = Gamma_t * Sigma_{t-1} provides the proper Bayesian scaling.
     """
+    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
     T = len(gammas)
     gammas    = gammas.to(DEVICE)
     bargammas = bargammas.to(DEVICE)
@@ -66,13 +66,13 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
         n     = min(BATCH_SIZE, num_samples - start)
         shape = (n, FACTOR_DIM)
 
-        A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
+        A = [sample_skewed_levy(LEVY_ALPHA, shape, DEVICE) for _ in range(T)]
 
         Sigmas = [sigmas[0] ** 2 * A[0]]
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        a_init = sample_skewed_levy(levy_alpha, shape, DEVICE)
+        a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)
         # barsigmas[-1] is nearly 1 because of scale preserving
         x = barsigmas[-1] * sample_sas(a_init)
 
@@ -122,8 +122,7 @@ def generate(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
 
 
 
-def generate_rejection(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler,
-                       cond_fn, num_samples=None, guidance_scale=1.0,
+def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=1.0,
                        hard=True, max_batches=50000):
     """
     Exact conditional sampling via rejection sampling on top of generate().
@@ -143,13 +142,12 @@ def generate_rejection(model, gammas, bargammas, sigmas, barsigmas, levy_alpha, 
 
     accepted = []
     n_tried  = 0
-    args     = (model, gammas, bargammas, sigmas, barsigmas, levy_alpha, scaler)
 
     for _ in range(max_batches):
         if len(accepted) >= num_samples:
             break
 
-        batch_np, _, _ = generate(*args, num_samples=BATCH_SIZE)
+        batch_np, _, _ = generate(model, scaler, num_samples=BATCH_SIZE)
         batch_t  = torch.tensor(scaler.transform(batch_np), dtype=torch.float32)
 
         n_tried += len(batch_t)
@@ -189,9 +187,8 @@ if __name__ == "__main__":
     model.load_state_dict(ckpt["model_state"])
 
     scaler = ckpt["scaler"]
-    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}")
-    samples, _, _ = generate(model, gammas, bargammas, sigmas, barsigmas, LEVY_ALPHA, scaler)
+    samples, _, _ = generate(model, scaler)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

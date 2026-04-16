@@ -88,7 +88,6 @@ class GaussianSampler(FactorSampler):
 class DiffusionSampler(FactorSampler):
     def __init__(self, checkpoint_path: str, device: str = None, guidance_scale: float = 1.0):
         from factor_diffusion_train import FactorDenoiser
-        from factor_diffusion_levy import levy_noise_schedule
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
@@ -97,33 +96,16 @@ class DiffusionSampler(FactorSampler):
         self.scaler = ckpt["scaler"]
         self.guidance_scale = guidance_scale
 
-        with open("cfg.yaml") as f:
-            cfg = yaml.safe_load(f)["train"]
-            self.levy_alpha = cfg["levy_alpha"]
-            self.num_timesteps = cfg["num_timesteps"]
-
-        self.gammas, self.bargammas, self.sigmas, self.barsigmas = levy_noise_schedule(self.levy_alpha, self.num_timesteps)
-
     def generate(self, num_generate: int) -> np.ndarray:
         from factor_diffusion_sample import generate
-        samples, _, _ = generate(
-            self.model, self.gammas, self.bargammas, self.sigmas, self.barsigmas,
-            self.levy_alpha, self.scaler, num_samples=num_generate
-        )
+        samples, _, _ = generate(self.model, self.scaler, num_samples=num_generate)
         return samples
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         from factor_diffusion_sample import generate
-        def wrapped_cond(x0_std):
-            scale = torch.tensor(self.scaler.scale_, dtype=x0_std.dtype, device=x0_std.device)
-            mean  = torch.tensor(self.scaler.mean_,  dtype=x0_std.dtype, device=x0_std.device)
-            x0_orig = x0_std * scale + mean
-            return cond_fn(x0_orig)
-
         samples, _, _ = generate(
-            self.model, self.gammas, self.bargammas, self.sigmas, self.barsigmas,
-            self.levy_alpha, self.scaler, num_samples=num_generate,
-            cond_fn=wrapped_cond, guidance_scale=self.guidance_scale
+            self.model, self.scaler, num_samples=num_generate,
+            cond_fn=cond_fn, guidance_scale=self.guidance_scale
         )
         return samples
 

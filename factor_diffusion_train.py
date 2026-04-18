@@ -1,4 +1,5 @@
 import os
+import sys
 import yaml
 import numpy as np
 import pandas as pd
@@ -12,8 +13,10 @@ from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sampl
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("cfg.yaml") as f:
-    _cfg = yaml.safe_load(f)["train"]
+_exp   = os.environ.get("EXP", "regression")
+PREFIX = f"model/{_exp}"
+with open(f"{PREFIX}/cfg.yaml") as f:
+    _cfg = yaml.safe_load(f)
 
 FACTOR_NAMES  = _cfg["factor_names"]
 EPOCHS        = _cfg["epochs"]
@@ -23,7 +26,7 @@ NUM_TIMESTEPS = _cfg["num_timesteps"]
 LEVY_ALPHA    = _cfg["levy_alpha"]
 MC_OUTER      = _cfg["mc_outer"]
 MC_INNER      = _cfg["mc_inner"]
-PREFIX        = _cfg["prefix"]
+CKPT_NAME     = _cfg["ckpt_name"]
 
 
 def load_data(csv_path):
@@ -147,7 +150,7 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler):
         "model_state":  model.state_dict(),
         "model_kwargs": model.kwargs,
         "scaler":       scaler,
-    }, f"{PREFIX}/checkpoints/factor_ep{epoch:04d}.pt")
+    }, f"{PREFIX}/checkpoints/{CKPT_NAME}.pt")
 
     # save the loss plot
     fig, ax = plt.subplots(figsize=(8, 4))

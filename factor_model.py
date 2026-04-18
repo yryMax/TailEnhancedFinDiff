@@ -242,5 +242,6 @@ def get_factor_model(path: str) -> FactorModel:
 
 
 if __name__ == '__main__':
-    get_factor_model("data/train24y.parquet").save("model/regression")
-    get_factor_model("data/test1y.parquet").save("model/regression/test")
+    print(f"Factor model on {_cfg["prefix"]}")
+    get_factor_model("data/train24y.parquet").save(f"{_cfg["prefix"]}")
+    get_factor_model("data/test1y.parquet").save(f"{_cfg["prefix"]}/test")

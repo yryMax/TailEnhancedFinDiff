@@ -1,4 +1,5 @@
 import os
+import sys
 import yaml
 import numpy as np
 import torch
@@ -7,19 +8,18 @@ from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sampl
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("cfg.yaml") as f:
-    _all_cfg = yaml.safe_load(f)
-    _tcfg    = _all_cfg["train"]
-    _scfg    = _all_cfg["sample"]
+_exp   = os.environ.get("EXP", "regression")
+PREFIX = f"model/{_exp}"
+with open(f"{PREFIX}/cfg.yaml") as f:
+    _cfg = yaml.safe_load(f)
 
-NUM_TIMESTEPS = _tcfg["num_timesteps"]
-LEVY_ALPHA    = _tcfg["levy_alpha"]
-PREFIX        = _tcfg["prefix"]
-BATCH_SIZE    = _tcfg["batch_size"]
-
-NUM_GENERATE  = _scfg["num_generate"]
-FACTOR_DIM    = len(_tcfg["factor_names"])
-CHECKPOINT    = f"{PREFIX}/checkpoints/factor_DLPM_ep0200.pt"
+NUM_TIMESTEPS = _cfg["num_timesteps"]
+LEVY_ALPHA    = _cfg["levy_alpha"]
+BATCH_SIZE    = _cfg["batch_size"]
+CKPT_NAME     = _cfg["ckpt_name"]
+NUM_GENERATE  = _cfg["num_generate"]
+FACTOR_DIM    = len(_cfg["factor_names"])
+CHECKPOINT    = f"{PREFIX}/checkpoints/{CKPT_NAME}.pt"
 OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 

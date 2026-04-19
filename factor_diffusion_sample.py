@@ -74,9 +74,9 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
 
         a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)
         # barsigmas[-1] is nearly 1 because of scale preserving
-        x = barsigmas[-1] * sample_sas(a_init)
+        # x = barsigmas[-1] * sample_sas(a_init)
 
-        # x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
+        x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
         for t in range(T - 1, 0, -1):
             t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
             eps_pred = model(x, t_b)

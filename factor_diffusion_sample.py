@@ -72,7 +72,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)
+        #a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)
         # barsigmas[-1] is nearly 1 because of scale preserving
         # x = barsigmas[-1] * sample_sas(a_init)
 
@@ -171,7 +171,7 @@ def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=
             f"(rate={rate:.4f}). Increase max_batches or relax the condition."
         )
     else:
-        print(f"  [rejection] accepted {n_got}/{n_tried}  (rate={rate:.4f})")
+        print(f"[rejection] accepted {n_got}/{n_tried}  (rate={rate:.4f})")
 
     return np.stack(accepted[:num_samples])
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-import yaml
 import numpy as np
 import pandas as pd
 import torch
@@ -135,10 +134,7 @@ class ScenarioGenerator:
         else:
             fs = self.factor_generate(num_generate)
 
-        if self.model.factor_type == "regression":
-            fs_full = np.column_stack([np.ones((len(fs), 1)), fs])
-        else:
-            fs_full = fs
+        fs_full = np.column_stack([np.ones((len(fs), 1)), fs])
             
         returns = reconstruct_returns(self.model, fs_full)
         return returns

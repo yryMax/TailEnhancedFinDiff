@@ -38,7 +38,7 @@ def sample_skewed_levy(alpha: float, shape: tuple, device=None) -> torch.Tensor:
     :param device: target device
     :return: tensor of shape `shape` with positive stable samples, clamped to [0, 2000]
     """
-    if alpha == 2.0:
+    if alpha >= 2.0:
         raw = torch.ones(shape)
         return raw.to(device) if device is not None else raw
 

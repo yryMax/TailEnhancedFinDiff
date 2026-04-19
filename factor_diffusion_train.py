@@ -48,7 +48,7 @@ class FactorDenoiser(nn.Module):
     :param cond_dim: timestep embedding dimension
     :param num_blocks: number of transformer blocks
     """
-    def __init__(self, dim=64, n_heads=4, cond_dim=128, num_blocks=1):
+    def __init__(self, dim=64, n_heads=4, cond_dim=128, num_blocks=4):
         super().__init__()
         self.kwargs = dict(dim=dim, n_heads=n_heads, cond_dim=cond_dim, num_blocks=num_blocks)
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)

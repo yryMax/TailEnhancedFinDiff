@@ -1,14 +1,13 @@
-import os
 import numpy as np
 import pytest
 import torch
 import matplotlib.pyplot as plt
 from factor_diffusion_train import FactorDenoiser
-from factor_diffusion_levy import levy_noise_schedule
 import yaml
 from factor_diffusion_sample import generate
 
-_exp   = os.environ.get("EXP", "regression")
+with open("cfg.yaml") as f:
+    _exp = yaml.safe_load(f)["experiment_name"]
 PREFIX = f"model/{_exp}"
 with open(f"{PREFIX}/cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
@@ -82,10 +81,10 @@ def _make_interval_cond(lo_norm, hi_norm, idx):
     def cond_fn(x0_hat):
         v = x0_hat[:, idx]
         penalty = torch.zeros_like(v)
-        if np.isfinite(hi_norm):
-            penalty = penalty + torch.relu(v - hi_norm)
-        if np.isfinite(lo_norm):
-            penalty = penalty + torch.relu(lo_norm - v)
+        if hi_norm is not None:
+            penalty = penalty + torch.relu(v - hi_norm) ** 5
+        if lo_norm is not None:
+            penalty = penalty + torch.relu(lo_norm - v) ** 5
         return penalty
     return cond_fn
 
@@ -93,16 +92,15 @@ def _make_interval_cond(lo_norm, hi_norm, idx):
 def test_demo(artifacts):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, cond_fn=None, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
 
     q1        = np.percentile(uncon, 1, axis=0)
-    qmin      = uncon.min(axis=0)
     q1_norm   = _to_norm(scaler, q1[VOL_IDX],   VOL_IDX)
-    qmin_norm = _to_norm(scaler, qmin[VOL_IDX], VOL_IDX)
 
-    cf = _make_interval_cond(qmin_norm, q1_norm, VOL_IDX)
+    cf = _make_interval_cond(None, q1_norm, VOL_IDX)
     lo, var_history, grad_history = generate(
-        model, scaler, cond_fn=cf, guidance_scale=5.0, num_samples=N_SAMPLES
+        model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+        cond_fn=cf, guidance_scale=5.0, num_samples=N_SAMPLES
     )
 
     print(f"Demo: vol q1={q1[VOL_IDX]:.4f}  lo mean={lo[:, VOL_IDX].mean():.4f}")
@@ -113,7 +111,7 @@ def test_demo(artifacts):
 def test_conditional_single(artifacts):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, cond_fn=None, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
 
     q5  = np.percentile(uncon, 5,  axis=0)
     q95 = np.percentile(uncon, 95, axis=0)
@@ -124,13 +122,11 @@ def test_conditional_single(artifacts):
         q5_norm  = _to_norm(scaler, q5[i],  i)
         q95_norm = _to_norm(scaler, q95[i], i)
 
-        # guide below q5: assert guided mean < median
-        lo, _, _ = generate(model, scaler,
-                            cond_fn=_make_interval_cond(-np.inf, q5_norm, i),
+        lo, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+                            cond_fn=_make_interval_cond(None, q5_norm, i),
                             guidance_scale=5.0, num_samples=N_SAMPLES)
-        # guide above q95: assert guided mean > median
-        hi, _, _ = generate(model, scaler,
-                            cond_fn=_make_interval_cond(q95_norm, np.inf, i),
+        hi, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+                            cond_fn=_make_interval_cond(q95_norm, None, i),
                             guidance_scale=5.0, num_samples=N_SAMPLES)
 
         lo_mean = lo[:, i].mean()
@@ -150,7 +146,7 @@ def test_conditional_single(artifacts):
 def test_double(artifacts, plo, phi):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, cond_fn=None, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
 
     lo_bound = np.percentile(uncon, plo, axis=0)
     hi_bound = np.percentile(uncon, phi, axis=0)
@@ -161,7 +157,7 @@ def test_double(artifacts, plo, phi):
         lo_norm = _to_norm(scaler, lo_bound[i], i)
         hi_norm = _to_norm(scaler, hi_bound[i], i)
 
-        guided, _, _ = generate(model, scaler,
+        guided, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
                                 cond_fn=_make_interval_cond(lo_norm, hi_norm, i),
                                 guidance_scale=5.0, num_samples=N_SAMPLES)
 

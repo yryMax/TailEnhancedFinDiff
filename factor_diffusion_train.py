@@ -13,7 +13,8 @@ from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sampl
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-_exp   = os.environ.get("EXP", "regression")
+with open("cfg.yaml") as f:
+    _exp = yaml.safe_load(f)["experiment_name"]
 PREFIX = f"model/{_exp}"
 with open(f"{PREFIX}/cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
@@ -147,9 +148,11 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler):
 
     os.makedirs(f"{PREFIX}/checkpoints", exist_ok=True)
     torch.save({
-        "model_state":  model.state_dict(),
-        "model_kwargs": model.kwargs,
-        "scaler":       scaler,
+        "model_state":   model.state_dict(),
+        "model_kwargs":  model.kwargs,
+        "scaler":        scaler,
+        "levy_alpha":    LEVY_ALPHA,
+        "num_timesteps": NUM_TIMESTEPS,
     }, f"{PREFIX}/checkpoints/{CKPT_NAME}.pt")
 
     # save the loss plot
@@ -165,6 +168,7 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler):
 
 if __name__ == "__main__":
     X, scaler = load_data(f"{PREFIX}/factors.csv")
+    print(f"experiment id: {_exp}")
     _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)

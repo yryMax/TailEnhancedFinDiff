@@ -1,2 +1,4 @@
+experiment_name: regression
+
 train:
   factor_names: [market, growth, momentum, quality, size, value, volatility]

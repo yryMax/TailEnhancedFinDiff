@@ -8,7 +8,8 @@ from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sampl
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-_exp   = os.environ.get("EXP", "regression")
+with open("cfg.yaml") as f:
+    _exp = yaml.safe_load(f)["experiment_name"]
 PREFIX = f"model/{_exp}"
 with open(f"{PREFIX}/cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
@@ -21,7 +22,6 @@ NUM_GENERATE  = _cfg["num_generate"]
 FACTOR_DIM    = len(_cfg["factor_names"])
 CHECKPOINT    = f"{PREFIX}/checkpoints/{CKPT_NAME}.pt"
 OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
-
 
 
 @torch.no_grad()
@@ -76,6 +76,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
         # barsigmas[-1] is nearly 1 because of scale preserving
         x = barsigmas[-1] * sample_sas(a_init)
 
+        # x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
         for t in range(T - 1, 0, -1):
             t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
             eps_pred = model(x, t_b)
@@ -181,7 +182,6 @@ if __name__ == "__main__":
     os.makedirs(f"{PREFIX}/samples", exist_ok=True)
     model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
-
     scaler = ckpt["scaler"]
 
     print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}")

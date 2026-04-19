@@ -223,3 +223,110 @@ Conceptual references
 - Classifier/energy guidance for diffusion models; plug‑and‑play/energy-based sampling; SDE/ODE probability-flow adjustments. The implementation here follows the same spirit with DLPM-consistent scaling.
 
 ---
+
+# Sampling Initialization Bug (alpha < 2) — Diagnosis & Fix
+
+## The Bug
+
+`generate()` in `factor_diffusion_sample.py` builds a Sigma chain from a pre-sampled A array `A[0..T-1]`, but then initializes $x_T$ from an **independent** subordinator `a_init`:
+
+```python
+# OLD — wrong for alpha < 2
+a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)   # independent of A[]
+x = barsigmas[-1] * sample_sas(a_init)
+```
+
+For alpha < 2, `a_init ~ S(alpha/2, 1)` is heavy-tailed and can differ wildly from the A values used to build the Sigma chain.  The scale of `x_T = barsigmas[-1] * sqrt(a_init) * z` and the scale predicted by the chain `sqrt(Sigma_T)` can mismatch by up to **50×** in practice (observed: 1.81 % of samples at n = 4096 exceeded a 5× mismatch; see below).
+
+For alpha = 2.0 there is no bug: `a_init ≡ 1` and `Sigma_T = barsigmas_T^2`, so the two initializations are identical.
+
+## Why the Mismatch Causes Huge Kurtosis
+
+When `|x_T| >> sqrt(Sigma_T)`, the model receives an input far outside its training distribution.  Its `eps_pred` is unreliable, so the posterior mean
+
+$$\mu_t = \frac{x_t - \bar\sigma_t \,\Gamma_t\, \hat\varepsilon}{\gamma_t}$$
+
+amplifies $x$ (division by $\gamma_t < 1$) instead of denoising it.  This cascade produces a handful of extreme outlier samples.  Verified on the regression checkpoint (alpha = 1.9):
+
+| factor | real kurtosis | generated kurtosis |
+|--------|:---:|:---:|
+| market | 10.9 | **1851** |
+| momentum | 15.0 | **2589** |
+| growth | 7.5 | 9.9 |
+
+The perfect-denoiser simulation (oracle $\hat\varepsilon$) recovers $x_0$ with MSE = 0 for both inits, confirming the **math is correct**; the issue is entirely the model encountering out-of-distribution inputs.
+
+## The Fix
+
+Initialize $x_T$ from $\mathcal{N}(0,\,\Sigma_T)$, consistent with the pre-sampled A chain:
+
+```python
+# NEW — consistent with A chain
+x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
+```
+
+This is valid because: sample $A_{1:T}$, then $x_T \mid A_{1:T} \sim \mathcal{N}(0, \Sigma_T)$, then run the DLPM reverse process conditioned on $A_{1:T}$.  Marginalizing over $A_{1:T}$ recovers the correct $p(x_0)$.
+
+After the fix, samples with mismatch ratio > 5× drop from 74 (1.81 %) to **0**.
+
+## Loss Scale Is Not Comparable Across Alpha
+
+- **alpha = 2.0**: `eps_t ~ N(0,1)`, trivial baseline (output 0) gives loss = 1.  Loss < 1 means the model works.
+- **alpha = 1.9**: `eps_t ~ SaS(1.9, 0)`, infinite variance (clamped to A ≤ 2000), trivial baseline gives loss >> 1.  Loss > 1 does **not** mean the model is worse than random — the baselines are on different scales.
+
+## DDPM Does Not Generate Gaussian Samples
+
+Setting alpha = 2.0 correctly degenerates to DDPM.  DDPM learns the **data distribution**, which for financial factor returns has kurtosis ≈ 7–15.  Generated samples will also be heavy-tailed.  The Gaussian qualifier refers to the noise process, not the generated distribution.
+
+## Secondary Concern: Training Instability for alpha < 2 with mc_outer = 1
+
+With `mc_outer = 1`, a single batch step containing a sample where $A_t \approx 2000$ produces an MSE loss spike of $\sim 2000$, swamping the gradient and destabilizing training.  The median-of-means estimator (mc_outer > 1, e.g. 5–10) removes this: the median is robust to extreme outer draws.  With `mc_outer = 1`, the model may learn to output near-zero for all inputs, causing mode collapse even after the initialization fix.
+
+---
+
+# EXP Environment Variable Bug — levy_alpha Mismatch at Inference
+
+## The Bug
+
+`factor_diffusion_sample.py` loads `LEVY_ALPHA` and `NUM_TIMESTEPS` from `model/{EXP}/cfg.yaml` **at module import time**, where `EXP = os.environ.get("EXP", "regression")`.
+
+`factor_evaluation.ipynb` sets `_exp = "DDPM"` for its own path construction but **never exports `EXP` to the environment**. When `DiffusionSampler` calls `from factor_diffusion_sample import generate`, the already-imported module uses `LEVY_ALPHA` from `model/regression/cfg.yaml` (= 1.9) — not from `model/DDPM/cfg.yaml` (= 2.0).
+
+Result: a checkpoint trained with `levy_alpha=2.0` (pure Gaussian schedule, `A_t ≡ 1`) is sampled with `levy_alpha=1.9` (heavy-tailed Lévy subordinators, stochastic `Sigma_t` that can reach ~2000). The model sees inputs far outside its training distribution; the denoising chain amplifies rather than contracts:
+
+| Metric | Generated (buggy) | Resample baseline |
+|--------|:-----------------:|:-----------------:|
+| Kurtosis MAE | **110.2** | 5.9 |
+| Std MAE | **0.159** | 0.001 |
+| Cov Frobenius dist | **3901** | 1.05 |
+
+## The Fix
+
+Three-part fix so inference always uses the schedule that matches training:
+
+1. **`factor_diffusion_train.py`** — save `levy_alpha` and `num_timesteps` inside the checkpoint:
+   ```python
+   torch.save({..., "levy_alpha": LEVY_ALPHA, "num_timesteps": NUM_TIMESTEPS}, path)
+   ```
+
+2. **`factor_diffusion_sample.py`** — `generate()` accepts `levy_alpha` and `num_timesteps` as explicit keyword args (fall back to module-level constants when `None`):
+   ```python
+   def generate(model, scaler, ..., levy_alpha=None, num_timesteps=None):
+       _levy_alpha    = levy_alpha    if levy_alpha    is not None else LEVY_ALPHA
+       _num_timesteps = num_timesteps if num_timesteps is not None else NUM_TIMESTEPS
+       ...
+   ```
+
+3. **`scenario_generator.py`** — `DiffusionSampler.__init__` reads `levy_alpha` and `num_timesteps` from the checkpoint and passes them to every `generate()` call:
+   ```python
+   self.levy_alpha    = ckpt.get("levy_alpha")
+   self.num_timesteps = ckpt.get("num_timesteps")
+   ```
+
+Existing checkpoints were back-patched with the correct values so no retraining is needed.
+
+## Verified Result
+
+After fix, with `EXP=DDPM` (or any EXP), `DiffusionSampler` always uses `levy_alpha=2.0` from the checkpoint. Generated kurtosis per factor: [6.2, 3.2, 4.1, 3.9, 3.5, 7.7, 2.6] — consistent with real data (target ≈ 7–15).
+
+---

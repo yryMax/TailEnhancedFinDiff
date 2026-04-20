@@ -78,21 +78,41 @@ class FactorDenoiser(nn.Module):
             h = blk(h, added_cond_kwargs={"pooled_text_emb": cond})
         return self.out_proj(h).squeeze(-1)          # (B, F)
 
-def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device):
+def compute_L_chol(X: np.ndarray) -> torch.Tensor:
+    """Cholesky of empirical correlation matrix for correlated SαS noise."""
+    C = np.corrcoef(X.T).astype(np.float32)
+    C += np.eye(C.shape[0], dtype=np.float32) * 1e-6
+    return torch.tensor(np.linalg.cholesky(C), dtype=torch.float32)
+
+
+def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L_chol=None):
     """
-    Compute DLPM epsilon-prediction loss via median-of-means MC estimator.
+    Compute DLPM loss via median-of-means MC estimator.
     When mc_outer=1 and mc_inner=1, degenerates to a single-sample MSE (no MC overhead).
-    Forward process: x_t = bg * x_0 + bs * eps,  eps = sample_sas(a),  a ~ S(alpha/2, 1)
-    Target:  eps_t = sample_sas(a)
-    Loss:    E[(model(x_t, t) - eps_t)^2], mean over inner then median over outer
+
+    L_chol: if given, uses correlated noise with unit-scale target w = z @ L.T.
+            Forward noise: eps = sqrt(A_shared) * w  (SαS-scaled correlated Gaussian).
+            Model is trained to predict w (not eps), so the loss target is O(1) regardless
+            of A — this stabilises training for alpha < 2 where A can reach 2000.
+            Sampling posterior mean uses sqrt(Sigma_t) instead of barsigmas[t] to
+            reconstruct the path-specific noise scale (see generate() in sample file).
+            If None, falls back to independent per-dimension epsilon prediction (standard DLPM).
     """
     B, D = x.shape
 
     if mc_outer == 1 and mc_inner == 1:
-        a     = sample_skewed_levy(alpha, (B, D), device)
-        eps_t = sample_sas(a)
-        x_t   = bg * x + bs * eps_t
-        return (model(x_t, t) - eps_t).pow(2).mean(dim=-1).mean()
+        if L_chol is not None:
+            a     = sample_skewed_levy(alpha, (B, 1), device)
+            z     = torch.randn(B, D, device=device)
+            w     = z @ L_chol.to(device).T       # unit-scale correlated noise (target)
+            eps_t = torch.sqrt(a) * w
+            x_t   = bg * x + bs * eps_t
+            return (model(x_t, t) - w).pow(2).mean(dim=-1).mean()
+        else:
+            a     = sample_skewed_levy(alpha, (B, D), device)
+            eps_t = sample_sas(a)
+            x_t   = bg * x + bs * eps_t
+            return (model(x_t, t) - eps_t).pow(2).mean(dim=-1).mean()
 
     N     = mc_outer * mc_inner
     x_mc  = x.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
@@ -100,21 +120,31 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device):
     bg_mc = bg.repeat(N, 1)
     bs_mc = bs.repeat(N, 1)
 
-    a_outer = sample_skewed_levy(alpha, (mc_outer * B, D), device)
-    a_mc    = (a_outer.view(mc_outer, 1, B, D)
-                      .expand(-1, mc_inner, -1, -1)
-                      .reshape(N * B, D))
+    if L_chol is not None:
+        a_outer   = sample_skewed_levy(alpha, (mc_outer * B, 1), device)
+        a_mc      = (a_outer.view(mc_outer, 1, B, 1)
+                            .expand(-1, mc_inner, -1, -1)
+                            .reshape(N * B, 1))
+        z_mc      = torch.randn(N * B, D, device=device)
+        w_mc      = z_mc @ L_chol.to(device).T    # unit-scale target
+        eps_t_mc  = torch.sqrt(a_mc) * w_mc
+        target_mc = w_mc
+    else:
+        a_outer   = sample_skewed_levy(alpha, (mc_outer * B, D), device)
+        a_mc      = (a_outer.view(mc_outer, 1, B, D)
+                            .expand(-1, mc_inner, -1, -1)
+                            .reshape(N * B, D))
+        eps_t_mc  = sample_sas(a_mc)
+        target_mc = eps_t_mc
 
-    eps_t_mc = sample_sas(a_mc)
-    x_t_mc   = bg_mc * x_mc + bs_mc * eps_t_mc
-
-    losses_mc = (model(x_t_mc, t_mc) - eps_t_mc).pow(2).mean(dim=-1)
-    losses_mc = losses_mc.view(mc_outer, mc_inner, B).mean(dim=1)   # mean over inner
-    loss, _   = losses_mc.median(dim=0)                              # median over outer
+    x_t_mc    = bg_mc * x_mc + bs_mc * eps_t_mc
+    losses_mc = (model(x_t_mc, t_mc) - target_mc).pow(2).mean(dim=-1)
+    losses_mc = losses_mc.view(mc_outer, mc_inner, B).mean(dim=1)
+    loss, _   = losses_mc.median(dim=0)
     return loss.mean()
 
 
-def train(model, loader, bargammas, barsigmas, optimizer, scaler):
+def train(model, loader, bargammas, barsigmas, optimizer, scaler, L_chol=None):
     import matplotlib.pyplot as plt
     os.makedirs("checkpoints", exist_ok=True)
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -132,10 +162,9 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler):
             bg  = bargammas_d[t].unsqueeze(-1)
             bs  = barsigmas_d[t].unsqueeze(-1)
 
-            loss = dlpm_loss(model, x, t, bg, bs, LEVY_ALPHA, MC_OUTER, MC_INNER, DEVICE)
+            loss = dlpm_loss(model, x, t, bg, bs, LEVY_ALPHA, MC_OUTER, MC_INNER, DEVICE,
+                             L_chol=L_chol)
 
-            # use huber_loss can panelty the extreme value
-            # loss = nn.functional.huber_loss(pred_noise, eps_t, reduction='mean', delta=3.0)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -153,6 +182,7 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler):
         "scaler":        scaler,
         "levy_alpha":    LEVY_ALPHA,
         "num_timesteps": NUM_TIMESTEPS,
+        "L_chol":        L_chol,
     }, f"{PREFIX}/checkpoints/{CKPT_NAME}.pt")
 
     # save the loss plot
@@ -171,8 +201,11 @@ if __name__ == "__main__":
     print(f"experiment id: {_exp}")
     _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 
+    L_chol = compute_L_chol(X)
+    print(f"L_chol computed from training data correlation (shape {L_chol.shape})")
+
     loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)
     model     = FactorDenoiser().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 
-    train(model, loader, bargammas, barsigmas, optimizer, scaler)
+    train(model, loader, bargammas, barsigmas, optimizer, scaler, L_chol=L_chol)

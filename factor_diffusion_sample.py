@@ -25,27 +25,20 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 
 @torch.no_grad()
-def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
+def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, L_chol=None):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
-    For each batch:
-    1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1)
-    2. Compute Sigma_t chain:
-           Sigma_0 = sigma_0^2 * A_0
-           Sigma_t = sigma_t^2 * A_t + gamma_t^2 * Sigma_{t-1}
-    3. Start from x_T ~ barsigmas[-1] * SαS  (marginal forward distribution).
-    4. Reverse denoising T-1 → 1:
-           Gamma_t  = 1 - gamma_t^2 * Sigma_{t-1} / Sigma_t
-           mean     = (x_t - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
-           variance = Gamma_t * Sigma_{t-1}
-           x_{t-1}  = mean + sqrt(variance) * N(0,I)
 
-    Optional DLPM-correct gradient guidance:
-        cond_fn(x0_hat: Tensor[n,D]) -> scalar loss
-            Receives the Tweedie x0 estimate; returns a scalar loss (higher = farther from target).
-        The posterior mean is corrected by:
-            mean -= guidance_scale * var * ∂loss/∂x_t
-        where var = Gamma_t * Sigma_{t-1} provides the proper Bayesian scaling.
+    L_chol: Cholesky of target correlation matrix (saved in checkpoint).
+            When provided, uses correlated noise with unit-scale w-prediction:
+              - A has shape (n, 1) — shared subordinator per sample
+              - Sigma chain scalar per sample: Sigma_t = S_t (CLAUDE.md)
+              - Init:          x_T = sqrt(S_T) * (randn @ L.T)
+              - Posterior mean: (x - Gamma_t * sqrt(Sigma_t) * eps_pred) / gamma_t
+                (model predicts w = Lz; sqrt(Sigma_t) recovers path-specific noise scale)
+              - Reverse noise: x_{t-1} = mean + sqrt(var) * (randn @ L.T)
+            When None, falls back to independent epsilon prediction (standard DLPM):
+              - Posterior mean: (x - barsigmas[t] * Gamma_t * eps_pred) / gamma_t
     """
     gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
     T = len(gammas)
@@ -53,6 +46,9 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
     bargammas = bargammas.to(DEVICE)
     sigmas    = sigmas.to(DEVICE)
     barsigmas = barsigmas.to(DEVICE)
+
+    if L_chol is not None:
+        L = L_chol.to(DEVICE)
 
     if num_samples is None:
         num_samples = NUM_GENERATE
@@ -63,20 +59,21 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
     grad_history = []
 
     for start in range(0, num_samples, BATCH_SIZE):
-        n     = min(BATCH_SIZE, num_samples - start)
-        shape = (n, FACTOR_DIM)
+        n = min(BATCH_SIZE, num_samples - start)
 
-        A = [sample_skewed_levy(LEVY_ALPHA, shape, DEVICE) for _ in range(T)]
+        # A shape: (n,1) with correlated noise (shared subordinator), (n,D) otherwise
+        a_shape = (n, 1) if L_chol is not None else (n, FACTOR_DIM)
+        A = [sample_skewed_levy(LEVY_ALPHA, a_shape, DEVICE) for _ in range(T)]
 
         Sigmas = [sigmas[0] ** 2 * A[0]]
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        #a_init = sample_skewed_levy(LEVY_ALPHA, shape, DEVICE)
-        # barsigmas[-1] is nearly 1 because of scale preserving
-        # x = barsigmas[-1] * sample_sas(a_init)
+        if L_chol is not None:
+            x = Sigmas[-1].sqrt() * (torch.randn(n, FACTOR_DIM, device=DEVICE) @ L.T)
+        else:
+            x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
 
-        x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
         for t in range(T - 1, 0, -1):
             t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
             eps_pred = model(x, t_b)
@@ -84,24 +81,31 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
             Sigma_t  = Sigmas[t]
             Sigma_t1 = Sigmas[t - 1]
 
-            # posterior contraction factor
+            # posterior contraction factor (scalar per sample; unchanged from standard DLPM)
             Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
 
-            # posterior mean
-            mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
+            # posterior mean:
+            # correlated (L_chol): model predicts w=Lz (unit-scale), multiply by sqrt(Sigma_t)
+            #   to recover path-specific noise: mean = (x - Gamma_t*sqrt(S_t)*w_hat) / gamma_t
+            # independent: model predicts eps_t directly, use barsigmas[t] as marginal scale
+            if L_chol is not None:
+                mean = (x - Gamma_t * Sigma_t.sqrt() * eps_pred) / gammas[t]
+            else:
+                mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
 
-            # posterior variance (Gaussian, conditioned on A)
+            # posterior variance scalar; noise is correlated when L_chol given
             var = (Gamma_t * Sigma_t1).clamp(min=0.0)
 
             if start == 0:
                 var_history.append((t, float(var.mean()), float(var.max())))
 
-            # DLPM-correct guidance: shift posterior mean by -s * var * ∂loss/∂x_t
-            # var provides natural Bayesian scaling
             if cond_fn is not None and 1 < t < T // 4:
                 with torch.enable_grad():
-                    x_g    = x.detach().requires_grad_(True)
-                    x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
+                    x_g = x.detach().requires_grad_(True)
+                    if L_chol is not None:
+                        x0_hat = (x_g - Sigma_t.sqrt() * eps_pred) / bargammas[t]
+                    else:
+                        x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
                     loss   = cond_fn(x0_hat).sum()
                     grad   = torch.autograd.grad(loss, x_g)[0]
                 grad_norm = grad.norm(dim=1, keepdim=True).clamp(min=1e-8)
@@ -110,11 +114,12 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
                     grad_history.append((t, float(grad.mean()), float(grad.max())))
                 mean = mean - guidance_scale * var * grad.detach()
 
-
             if t > 1:
-                x = mean + var.sqrt() * torch.randn_like(x)
+                z = torch.randn(n, FACTOR_DIM, device=DEVICE)
+                noise = (z @ L.T) if L_chol is not None else z
+                x = mean + var.sqrt() * noise
             else:
-                x = mean   # no noise at last step
+                x = mean
 
         batches.append(x.cpu())
 

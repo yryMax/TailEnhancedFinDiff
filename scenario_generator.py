@@ -101,18 +101,21 @@ class DiffusionSampler(FactorSampler):
         self.model = FactorDenoiser(**ckpt["model_kwargs"]).to(self.device)
         self.model.load_state_dict(ckpt["model_state"])
         self.scaler = ckpt["scaler"]
+        self.L_chol = ckpt.get("L_chol")
         self.guidance_scale = guidance_scale
 
     def generate(self, num_generate: int) -> np.ndarray:
         from factor_diffusion_sample import generate
-        samples, _, _ = generate(self.model, self.scaler, num_samples=num_generate)
+        samples, _, _ = generate(self.model, self.scaler, num_samples=num_generate,
+                                 L_chol=self.L_chol)
         return samples
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         from factor_diffusion_sample import generate
         samples, _, _ = generate(
             self.model, self.scaler, num_samples=num_generate,
-            cond_fn=cond_fn, guidance_scale=self.guidance_scale
+            cond_fn=cond_fn, guidance_scale=self.guidance_scale,
+            L_chol=self.L_chol,
         )
         return samples
 

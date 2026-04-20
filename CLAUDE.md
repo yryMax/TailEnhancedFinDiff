@@ -330,3 +330,80 @@ Existing checkpoints were back-patched with the correct values so no retraining 
 After fix, with `EXP=DDPM` (or any EXP), `DiffusionSampler` always uses `levy_alpha=2.0` from the checkpoint. Generated kurtosis per factor: [6.2, 3.2, 4.1, 3.9, 3.5, 7.7, 2.6] — consistent with real data (target ≈ 7–15).
 
 ---
+
+# Correlated Noise DLPM — Derivation & Implementation
+
+## Motivation
+
+Standard DLPM adds independent noise per factor dimension:
+
+$$\varepsilon_t = \sqrt{A_t} \cdot z_t, \qquad z_t \sim \mathcal{N}(0, I), \quad A_t \sim S(\alpha/2,\,1) \text{ per dimension}$$
+
+This destroys factor correlation structure at large $t$, forcing the reverse process to reconstruct correlations from scratch via attention — a hard task with limited data and a training loss that never explicitly rewards it.
+
+**Key observation (from eigenvalue analysis of factor correlation matrix):** DLPM captures correlations well only when one eigenvalue dominates the correlation matrix. With a flat eigenvalue spectrum, there is no strong correlation signal for the denoiser to latch onto.
+
+## Correlated Noise Forward Process
+
+Replace independent noise with multivariate SαS noise that has the **target correlation structure** $C_{\text{target}}$ baked in:
+
+$$\varepsilon_t = \sqrt{A_t} \cdot (L z_t), \qquad L L^\top = C_{\text{target}}, \quad z_t \sim \mathcal{N}(0,I), \quad A_t \sim S(\alpha/2,\,1) \text{ shared scalar}$$
+
+**Critical difference from tried "shared $A_t$":**
+- Previous attempt: $\sqrt{a_{\text{shared}}} \cdot z$ — scales correlated, *directions independent*
+- This approach: $\sqrt{a_{\text{shared}}} \cdot Lz$ — scales correlated *and* directions have target correlations
+
+**Marginal SαS property preserved:** since $L$ is Cholesky of a correlation matrix (unit diagonal), each row satisfies $\|L_i\|_2 = 1$, so $(Lz)_i \sim \mathcal{N}(0,1)$ and $\varepsilon_{t,i} = \sqrt{A_t} \cdot \mathcal{N}(0,1) \sim S\alpha S(\alpha,\, \text{scale}=1)$. ✓
+
+## Posterior Derivation
+
+Conditioned on $A_{1:t}$, the noise covariance at each step is $\sigma_t^2 A_t \cdot C_{\text{target}}$.
+
+**Matrix Sigma chain:**
+
+$$\Sigma_t = \sigma_t^2 A_t \cdot C_{\text{target}} + \gamma_t^2 \Sigma_{t-1}$$
+
+Since every term carries $C_{\text{target}}$, define scalar $S_t = \sigma_t^2 A_t + \gamma_t^2 S_{t-1}$ (same recursion as original DLPM). Then:
+
+$$\boxed{\Sigma_t = S_t \cdot C_{\text{target}}}$$
+
+**$\Gamma_t$ is still a scalar:**
+
+$$\Gamma_t = I - \gamma_t^2 \Sigma_{t-1} \Sigma_t^{-1} = I - \frac{\gamma_t^2 S_{t-1}}{S_t} \underbrace{C_{\text{target}} C_{\text{target}}^{-1}}_{=I} = \underbrace{\left(1 - \frac{\gamma_t^2 S_{t-1}}{S_t}\right)}_{\text{scalar}} \cdot I$$
+
+**Posterior mean — w-prediction formulation:**
+
+Instead of predicting $\hat\varepsilon = \sqrt{A_{\text{marg}}} \cdot w$ (standard eps-prediction, unbounded for heavy $A$), the model is trained to predict $\hat w = Lz$ (unit-scale, bounded variance). The posterior mean becomes:
+
+$$\mu_t = \frac{x_t - \Gamma_t \sqrt{S_t}\, \hat w}{\gamma_t}$$
+
+This matches the original formula because $\bar\sigma_t \cdot \hat\varepsilon = \bar\sigma_t \cdot \sqrt{A_{\text{marg}}} \cdot \hat w = \sqrt{S_t} \cdot \hat w$ (since $S_t = \bar\sigma_t^{\alpha} \cdot A_{\text{marg}}$, and for $\alpha=2$: $\sqrt{S_t} = \bar\sigma_t$). Degenerates exactly to DDPM for $\alpha=2$. ✓
+
+**Why w-prediction instead of eps-prediction:**  
+With shared $A_t$ (scalar), training target $\hat\varepsilon = \sqrt{A} \cdot Lz$ has variance proportional to $A$ — which can reach 2000. All $D$ dimensions explode simultaneously, making gradient magnitude ~2000× larger than normal. The `mc_outer=5` median cannot compensate because the dimension-averaging benefit (which stabilises per-dim eps-prediction) is lost. Result: mode collapse to near-zero output.  
+With $\hat w = Lz$, the target always has unit variance. Training is stable regardless of $A$.
+
+**Posterior variance:** $\text{var}_t = \Gamma_t \cdot S_{t-1}$ (scalar, same as before)
+
+To sample: $x_{t-1} = \mu_t + \sqrt{\Gamma_t S_{t-1}} \cdot L z$, i.e., replace `randn` with `L @ randn` everywhere.
+
+## Code Changes (4 locations)
+
+| Location | Original (eps-pred) | Correlated (w-pred) |
+|---|---|---|
+| `dlpm_loss` — loss target | `model(x_t) - eps_t` | `model(x_t) - w`  where `w = z @ L.T` |
+| `generate` — posterior mean | `(x - barsigmas[t]*Gamma_t*eps) / gamma_t` | `(x - Gamma_t*sqrt(Sigma_t)*w_hat) / gamma_t` |
+| `generate` — init $x_T$ | `Sigmas[-1].sqrt() * randn` | `Sigmas[-1].sqrt() * (randn @ L.T)` |
+| `generate` — reverse noise | `var.sqrt() * randn` | `var.sqrt() * (randn @ L.T)` |
+
+$L$ is computed once from training factors and saved into the checkpoint.
+
+## Why Correlation Preservation Works
+
+With $C_{\text{target}} = \text{empirical training correlation}$:
+
+$$\text{Cov}(x_t \mid A) = \bar\gamma_t^2 \cdot \text{Cov}(x_0) + \bar\sigma_t^2 A \cdot C_{\text{target}} \approx S_t \cdot C_{\text{target}} \text{ (for all } t \text{)}$$
+
+The correlation structure is **constant throughout diffusion** (unlike original DLPM where it decays from $C_{\text{data}}$ to $I$ as $t \to T$). The model always sees correlated inputs and always predicts correlated noise — the task is consistent and explicitly rewarded by the MSE loss.
+
+---

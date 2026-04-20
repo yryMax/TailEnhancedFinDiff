@@ -25,7 +25,7 @@ OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
 
 
 @torch.no_grad()
-def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
+def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, L=None):
     """
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
     For each batch:
@@ -57,6 +57,8 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
     if num_samples is None:
         num_samples = NUM_GENERATE
 
+    L_d = L.to(DEVICE) if L is not None else None
+
     model.eval()
     batches = []
     var_history = []
@@ -76,7 +78,10 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
         # barsigmas[-1] is nearly 1 because of scale preserving
         # x = barsigmas[-1] * sample_sas(a_init)
 
-        x = Sigmas[-1].sqrt() * torch.randn(n, FACTOR_DIM, device=DEVICE)
+        z_init = torch.randn(n, FACTOR_DIM, device=DEVICE)
+        if L_d is not None:
+            z_init = z_init @ L_d.T
+        x = Sigmas[-1].sqrt() * z_init
         for t in range(T - 1, 0, -1):
             t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
             eps_pred = model(x, t_b)
@@ -112,7 +117,10 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None):
 
 
             if t > 1:
-                x = mean + var.sqrt() * torch.randn_like(x)
+                z = torch.randn_like(x)
+                if L_d is not None:
+                    z = z @ L_d.T
+                x = mean + var.sqrt() * z
             else:
                 x = mean   # no noise at last step
 
@@ -183,8 +191,10 @@ if __name__ == "__main__":
     model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     scaler = ckpt["scaler"]
+    L      = ckpt.get("L_noise")
 
-    print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}")
-    samples, _, _ = generate(model, scaler)
+    print(f"LEVY_ALPHA={LEVY_ALPHA}, T={NUM_TIMESTEPS}, "
+          f"L_noise={'yes' if L is not None else 'no'}")
+    samples, _, _ = generate(model, scaler, L=L)
     np.save(OUT_PATH, samples)
     print(f"Saved {samples.shape} samples → {OUT_PATH}")

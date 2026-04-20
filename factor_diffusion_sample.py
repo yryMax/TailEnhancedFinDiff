@@ -131,7 +131,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, 
 
 
 
-def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=1.0, max_batches=50000):
+def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=1.0, max_batches=50000, L=None):
     """
     Exact conditional sampling via rejection sampling on top of generate().
 
@@ -155,7 +155,7 @@ def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=
         if len(accepted) >= num_samples:
             break
 
-        batch_np, _, _ = generate(model, scaler, num_samples=BATCH_SIZE)
+        batch_np, _, _ = generate(model, scaler, num_samples=BATCH_SIZE , L = L)
         batch_t  = torch.tensor(scaler.transform(batch_np), dtype=torch.float32)
 
         n_tried += len(batch_t)

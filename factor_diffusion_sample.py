@@ -30,15 +30,13 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, 
     DLPM reverse process. alpha=2 automatically degenerates to DDPM.
 
     L_chol: Cholesky of target correlation matrix (saved in checkpoint).
-            When provided, uses correlated noise with unit-scale w-prediction:
-              - A has shape (n, 1) — shared subordinator per sample
+            When provided, uses correlated eps-prediction:
+              - A has shape (n, 1) — shared subordinator per sample (scalar)
               - Sigma chain scalar per sample: Sigma_t = S_t (CLAUDE.md)
               - Init:          x_T = sqrt(S_T) * (randn @ L.T)
-              - Posterior mean: (x - Gamma_t * sqrt(Sigma_t) * eps_pred) / gamma_t
-                (model predicts w = Lz; sqrt(Sigma_t) recovers path-specific noise scale)
+              - Posterior mean: (x - barsigmas[t] * Gamma_t * eps_pred) / gamma_t  (standard)
               - Reverse noise: x_{t-1} = mean + sqrt(var) * (randn @ L.T)
-            When None, falls back to independent epsilon prediction (standard DLPM):
-              - Posterior mean: (x - barsigmas[t] * Gamma_t * eps_pred) / gamma_t
+            When None, independent per-dimension eps-prediction (standard DLPM).
     """
     gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
     T = len(gammas)
@@ -84,14 +82,9 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, 
             # posterior contraction factor (scalar per sample; unchanged from standard DLPM)
             Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
 
-            # posterior mean:
-            # correlated (L_chol): model predicts w=Lz (unit-scale), multiply by sqrt(Sigma_t)
-            #   to recover path-specific noise: mean = (x - Gamma_t*sqrt(S_t)*w_hat) / gamma_t
-            # independent: model predicts eps_t directly, use barsigmas[t] as marginal scale
-            if L_chol is not None:
-                mean = (x - Gamma_t * Sigma_t.sqrt() * eps_pred) / gammas[t]
-            else:
-                mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
+            # posterior mean: standard DLPM eps-prediction formula
+            # (same for correlated and independent — correlation only affects noise structure)
+            mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
 
             # posterior variance scalar; noise is correlated when L_chol given
             var = (Gamma_t * Sigma_t1).clamp(min=0.0)
@@ -102,10 +95,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, 
             if cond_fn is not None and 1 < t < T // 4:
                 with torch.enable_grad():
                     x_g = x.detach().requires_grad_(True)
-                    if L_chol is not None:
-                        x0_hat = (x_g - Sigma_t.sqrt() * eps_pred) / bargammas[t]
-                    else:
-                        x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
+                    x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]
                     loss   = cond_fn(x0_hat).sum()
                     grad   = torch.autograd.grad(loss, x_g)[0]
                 grad_norm = grad.norm(dim=1, keepdim=True).clamp(min=1e-8)

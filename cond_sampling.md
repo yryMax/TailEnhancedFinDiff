@@ -44,8 +44,6 @@ M -> 1, i.e. $\sup W$
 
 And in the code it is one line `accept = np.random.rand() < np.exp(-guidance_scale * loss_i)`
 
-BUT IT IS VERY SLOW WHEN THE CONDITION IS HARD TO FULFILL
-
 ### Gradient Guidance
 
 Instead of sampling $p(x)$ and rejecting, we modify the reverse diffusion process so it directly samples from $p^*(x_0) \propto p(x_0)\,e^{-sL(x_0)}$.
@@ -92,7 +90,32 @@ So also one line: `mean -= guidance_scale * var * grad` in `generate()`.
 
 ### Empirical Result
 
+![img_3.png](img_3.png)
+
+Gray: Diffusion Synthesized
+
+Red: Diffusion Synthesized Conditioned with Rejection Sampling
+
+Blue: Diffusion Synthesized Conditioned with Gradient Guidance (ours)
+
+Green: Gaussian synthesized Conditioned with Rejection Sampling
+
+Yellow: Resampled from Training data Conditioned with Rejection Sampling
 
 
 ### Common Q&A
 
+1. Why not the other baselines:
+
+Yellow -> not generalizable |
+Green -> unfair |
+Red -> super-duper slow
+
+2. What is guidance scale and L
+
+We sample from $p(x) \exp(-s\cdot L(x))$ as a proxy of p(x|y). L(x) is designed according to y,  
+guidance scale controls the shape of p(y|x) (the likelihood)
+
+3. What if condition y is not defined on sample x
+
+Diffusion model can still handle it! but it requires manual labeling and are gonna be very empirical

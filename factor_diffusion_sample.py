@@ -137,11 +137,6 @@ def generate_rejection(model, scaler, cond_fn, num_samples=None, guidance_scale=
 
     Each iteration calls generate(..., num_samples=BATCH_SIZE, cond_fn=None) to get
     an unconditional batch, then accepts each sample based on cond_fn:
-      hard=True  (default): accept if cond_fn(x0[i:i+1]) < 1e-8
-                            (relu hinge loss == 0 iff constraint satisfied)
-      hard=False           : accept with probability exp(-guidance_scale * loss_i)
-                            exact samples from p_uncon(x0) * exp(-guidance_scale * L(x0))
-
     cond_fn called with n=1 so .mean() in the closure returns the per-sample value.
     Returns np.ndarray (num_samples, FACTOR_DIM) in original space.
     """

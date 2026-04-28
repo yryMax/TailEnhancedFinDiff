@@ -8,7 +8,10 @@ import pandas as pd
 from scipy.stats import t as scipy_t
 
 with open("cfg.yaml") as f:
-    _cfg = yaml.safe_load(f)["train"]
+    _exp = yaml.safe_load(f)["experiment_name"]
+PREFIX = f"model/{_exp}"
+with open(f"{PREFIX}/cfg.yaml") as f:
+    _cfg = yaml.safe_load(f)
 
 FEATURES: list[str] = [f for f in _cfg["factor_names"] if f != "market"]
 
@@ -104,8 +107,8 @@ class FactorModel:
     # per-stock residual std (S,)
     res_std: np.ndarray
 
-    # degrees of freedom fitted from pooled standardised residuals
-    res_df: float
+    # per-stock Student-t degrees of freedom (S,); np.inf marks Gaussian fallback
+    res_df: np.ndarray
 
     # time-series residuals (T, S), may contain NaN for missing observations
     residuals: np.ndarray
@@ -133,7 +136,7 @@ class FactorModel:
             f"{prefix}/model.npz",
             beta=self.beta,
             res_std=self.res_std,
-            res_df=np.array(self.res_df),
+            res_df=np.asarray(self.res_df),
             residuals=self.residuals,
             factor_type=np.array(self.factor_type),
             factor_columns=np.array(self.F.columns.tolist()),
@@ -158,7 +161,7 @@ class FactorModel:
             F=F,
             beta=npz["beta"],
             res_std=npz["res_std"],
-            res_df=float(npz["res_df"]),
+            res_df=np.asarray(npz["res_df"]),
             residuals=npz["residuals"],
             factor_type=str(npz["factor_type"]),
             features=npz["features"].tolist(),
@@ -200,15 +203,22 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
     residuals = R_aligned.values - R_hat
     res_std = np.sqrt(np.nanmean(residuals ** 2, axis=0))
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        std_res = residuals / np.where(res_std > 0, res_std, np.nan)
-    flat = std_res.ravel()
-    flat = flat[np.isfinite(flat)]
-    df_fit, _, _ = scipy_t.fit(flat, floc=0)
-    print(f"Fitted residual t-distribution: df = {df_fit:.3f}")
+    # Per-stock Student-t fit on standardised residuals; np.inf means Gaussian fallback.
+    res_df = np.full(S, np.inf)
+    for s in range(S):
+        col = residuals[:, s]
+        col = col[np.isfinite(col)]
+        if len(col) < 30 or not (res_std[s] > 0):
+            continue
+        try:
+            df_s, _, _ = scipy_t.fit(col / res_std[s], floc=0)
+        except Exception:
+            continue
+        if 2.1 <= df_s < 30:
+            res_df[s] = df_s
 
     factor_type = "portsort" if "alpha" not in F.columns else "regression"
-    return FactorModel(F=F_aligned, beta=beta, res_std=res_std, res_df=df_fit,
+    return FactorModel(F=F_aligned, beta=beta, res_std=res_std, res_df=res_df,
                        residuals=residuals, factor_type=factor_type, data_source=path)
 
 
@@ -222,7 +232,16 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta
-    noise = np.random.standard_t(model.res_df, size=(N, S)) * np.sqrt((model.res_df - 2) / model.res_df)
+
+    res_df = np.asarray(model.res_df)
+    noise = np.empty((N, S))
+    for s in range(S):
+        df_s = float(res_df[s])
+        if np.isfinite(df_s):
+            noise[:, s] = np.random.standard_t(df_s, size=N) * np.sqrt((df_s - 2) / df_s)
+        else:
+            noise[:, s] = np.random.randn(N)
+
     idiosyncratic = noise * model.res_std
     return systematic + idiosyncratic
 
@@ -242,6 +261,6 @@ def get_factor_model(path: str) -> FactorModel:
 
 
 if __name__ == '__main__':
-    print(f"Factor model on {_cfg["prefix"]}")
-    get_factor_model("data/train24y.parquet").save(f"{_cfg["prefix"]}")
-    get_factor_model("data/test1y.parquet").save(f"{_cfg["prefix"]}/test")
+    print(f"Factor model on {PREFIX}")
+    get_factor_model("data/train24y.parquet").save(PREFIX)
+    get_factor_model("data/test1y.parquet").save(f"{PREFIX}/test")

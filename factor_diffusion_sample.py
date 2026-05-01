@@ -1,5 +1,4 @@
 import os
-import sys
 import yaml
 import numpy as np
 import torch
@@ -21,7 +20,7 @@ CKPT_NAME     = _cfg["ckpt_name"]
 NUM_GENERATE  = _cfg["num_generate"]
 FACTOR_DIM    = len(_cfg["factor_names"])
 CHECKPOINT    = f"{PREFIX}/checkpoints/{CKPT_NAME}.pt"
-OUT_PATH      = f"{PREFIX}/samples/factor_{NUM_GENERATE}.npy"
+OUT_PATH      = f"{PREFIX}/samples/factor_{CKPT_NAME}_{NUM_GENERATE}.npy"
 
 
 @torch.no_grad()

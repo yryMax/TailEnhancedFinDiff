@@ -177,7 +177,9 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler, L=None):
 
 
 if __name__ == "__main__":
-    X, scaler = load_data(f"{PREFIX}/factors_anisotropic_synth.csv")
+    DATA_FILE = _cfg.get("data_file", "factors_amplified_synth.csv")
+    X, scaler = load_data(f"{PREFIX}/{DATA_FILE}")
+    print(f"data file: {DATA_FILE}")
     print(f"experiment id: {_exp}")
     _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 

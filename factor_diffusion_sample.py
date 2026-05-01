@@ -103,7 +103,7 @@ def generate(model, scaler, cond_fn=None, guidance_scale=5.0, num_samples=None, 
 
             # DLPM-correct guidance: shift posterior mean by -s * var * ∂loss/∂x_t
             # var provides natural Bayesian scaling
-            if cond_fn is not None and 1 < t < T // 4:
+            if cond_fn is not None and 1 < t < T:
                 with torch.enable_grad():
                     x_g    = x.detach().requires_grad_(True)
                     x0_hat = (x_g - barsigmas[t] * eps_pred) / bargammas[t]

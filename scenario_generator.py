@@ -36,12 +36,15 @@ class ResampleSampler(FactorSampler):
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         accepted = []
+        n_tried  = 0
         _mean  = torch.tensor(self.scaler.mean_,  dtype=torch.float32)
         _scale = torch.tensor(self.scaler.scale_, dtype=torch.float32)
+        D = len(_mean)
         for _ in range(self.max_batches):
             if len(accepted) >= num_generate:
                 break
             candidates = self.generate(self.batch_size)
+            n_tried += len(candidates)
             for i in range(len(candidates)):
                 xi = torch.tensor(candidates[i:i+1], dtype=torch.float32)
                 xi_norm = (xi - _mean) / _scale
@@ -53,7 +56,11 @@ class ResampleSampler(FactorSampler):
                     accepted.append(candidates[i])
                 if len(accepted) >= num_generate:
                     break
-        return np.stack(accepted[:num_generate]) if accepted else np.array([])
+        rate = len(accepted) / max(n_tried, 1)
+        print(f"[ResampleSampler] accepted {len(accepted)}/{n_tried}  (rate={rate:.4f})")
+        if not accepted:
+            return np.empty((0, D))
+        return np.stack(accepted[:num_generate])
 
 class GaussianSampler(FactorSampler):
     def __init__(self, train_factors: pd.DataFrame, scaler, guidance_scale: float = 1.0, rng: np.random.Generator = None):
@@ -71,14 +78,17 @@ class GaussianSampler(FactorSampler):
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         accepted = []
+        n_tried  = 0
         _mean  = torch.tensor(self.scaler.mean_,  dtype=torch.float32)
         _scale = torch.tensor(self.scaler.scale_, dtype=torch.float32)
+        D = len(_mean)
 
         for _ in range(self.max_batches):
             if len(accepted) >= num_generate:
                 break
 
             candidates = self.generate(self.batch_size)
+            n_tried += len(candidates)
             for i in range(len(candidates)):
                 xi = torch.tensor(candidates[i:i+1], dtype=torch.float32)
                 xi_norm = (xi - _mean) / _scale
@@ -90,7 +100,11 @@ class GaussianSampler(FactorSampler):
                     accepted.append(candidates[i])
                 if len(accepted) >= num_generate:
                     break
-        return np.stack(accepted[:num_generate]) if accepted else np.array([])
+        rate = len(accepted) / max(n_tried, 1)
+        print(f"[GaussianSampler] accepted {len(accepted)}/{n_tried}  (rate={rate:.4f})")
+        if not accepted:
+            return np.empty((0, D))
+        return np.stack(accepted[:num_generate])
 
 class DiffusionSampler(FactorSampler):
     def __init__(self, checkpoint_path: str, device: str = None, guidance_scale: float = 1.0):

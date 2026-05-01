@@ -330,3 +330,59 @@ Existing checkpoints were back-patched with the correct values so no retraining 
 After fix, with `EXP=DDPM` (or any EXP), `DiffusionSampler` always uses `levy_alpha=2.0` from the checkpoint. Generated kurtosis per factor: [6.2, 3.2, 4.1, 3.9, 3.5, 7.7, 2.6] — consistent with real data (target ≈ 7–15).
 
 ---
+
+# Conditional Generation: Missing Cross-Factor Co-movement
+
+## The Symptom
+
+In `conditional_evaluation.ipynb`, conditioning the diffusion model on `volatility < q3` (3% quantile, threshold ≈ −0.0076) via gradient guidance (`guidance_scale = 5`) successfully shifts the **volatility** marginal below the threshold, but the **other six factors barely move** from their unconditional marginals.
+
+By contrast:
+- **Gaussian baseline** (`GaussianSampler`, multivariate-normal closed-form conditioning): other factors visibly co-move in the direction implied by historical correlations.
+- **Soft rejection sampling** (`generate_rejection`, target `p(x)·exp(−s·L)`): other factors also co-move, since cross-factor structure is inherited from the unconditional model and only reweighted on the constrained axis.
+- **Historical OOS stress days** (filtered for `momentum < q3`): clear co-movement across factors.
+
+So the failure is **specific to gradient-guided diffusion**, not to DLPM as a model — the unconditional correlation matrix from diffusion already matches the historical/Gaussian correlation structure (see correlation scatter plot in the notebook).
+
+## Root Cause: Detached Model Path Kills Cross-Factor Gradient
+
+In `factor_diffusion_sample.generate()`, guidance is applied as:
+
+$$\mu_t \leftarrow \mu_t - s\cdot \mathrm{var}_t \cdot \nabla_{x_t} L(\hat x_0), \qquad \hat x_0 = (x_t - \bar\sigma_t\,\hat\varepsilon_\theta(x_t,t))/\bar\gamma_t$$
+
+The energy used here only depends on the constrained coordinate (volatility, index `vol`):
+
+$$L(\hat x_0) = \mathrm{relu}(\hat x_{0,\mathrm{vol}} - q)^2$$
+
+so $\nabla_{\hat x_0} L$ is non-zero only on the `vol` coordinate. The cross-factor coupling — i.e. "if vol is pushed low, market/momentum/value should follow" — must come entirely through $\partial \hat x_0 / \partial x_t$, which factors as:
+
+$$\frac{\partial \hat x_0}{\partial x_t} = \frac{1}{\bar\gamma_t}\!\left(I - \bar\sigma_t \frac{\partial \hat\varepsilon_\theta}{\partial x_t}\right)$$
+
+The dense Jacobian $\partial \hat\varepsilon_\theta / \partial x_t$ from the Transformer denoiser is exactly what carries cross-factor information. **The implementation `.detach()`s `eps_pred` before computing the guidance gradient** (for stability/cost — see "Why guidance is an approximation" section above). After detaching:
+
+$$\frac{\partial \hat x_0}{\partial x_t} = \frac{1}{\bar\gamma_t}\,I \quad\Longrightarrow\quad \nabla_{x_t} L(\hat x_0) = \frac{1}{\bar\gamma_t}\big[0,\dots,0,\,2\,\mathrm{relu}(\hat x_{0,\mathrm{vol}}-q),\,0,\dots,0\big]$$
+
+The guidance vector is **zero on every coordinate except `vol`**. So guidance only pushes volatility down; the other factors evolve under the unconditional reverse process and end up at their unconditional marginals. Increasing `guidance_scale` cannot fix this — it only multiplies a zero.
+
+## Why the Other Methods Don't Have This Problem
+
+| Method | Mechanism for cross-factor coupling |
+|---|---|
+| Gaussian (`GaussianSampler`) | Closed-form conditional mean $\mu_{-i} + \Sigma_{-i,i}\Sigma_{ii}^{-1}(x_i - \mu_i)$ — exact by construction. |
+| Soft rejection (`generate_rejection`) | Samples from full $p(x)$ then reweights by $\exp(-sL)$; the joint dependence in $p$ is preserved on all axes. |
+| Diffusion + gradient guidance (detached) | Only the constrained axis receives a non-zero gradient → no coupling. |
+
+## Fix Options (in order of recommendation)
+
+1. **Don't detach `eps_pred` during conditional sampling.** Let autograd flow through the denoiser so $\partial \hat\varepsilon_\theta / \partial x_t$ contributes to the guidance direction. Costs one extra backward through the model per step; may need gradient clipping for stability with $\alpha < 2$.
+2. **Use soft rejection as the production path** for stress conditioning. With 7 factors and a 3% quantile, acceptance rate ≈ 5% (4096 / 82688 in the notebook) is tractable.
+3. **SMC / particle-filter guidance.** At each step, resample particles by weights $\exp(-sL)$ instead of taking gradient steps. No gradient needed; cross-factor structure preserved by the unconditional dynamics.
+4. **Calibrate `guidance_scale` against rejection** as a reference, but understand that under detached guidance, no scale value will recover cross-factor co-movement — it is a structural limitation of the current implementation, not a tuning problem.
+
+## Code Waypoints
+
+- Guidance gradient (the detach is here): `factor_diffusion_sample.generate()` — search for `eps_pred` and `grad`.
+- Reference behavior: `factor_diffusion_sample.generate_rejection()`, `GaussianSampler` in `scenario_generator.py`.
+- Reproduction notebook: `conditional_evaluation.ipynb`, In[15] (histogram across methods) and In[19] (per-factor KDE grid showing flat non-vol marginals for Diffusion row vs. shifted marginals for Rejection / Gaussian rows).
+
+---

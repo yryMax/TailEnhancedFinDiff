@@ -1,5 +1,4 @@
 import os
-import sys
 import yaml
 import numpy as np
 import pandas as pd
@@ -178,7 +177,7 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler, L=None):
 
 
 if __name__ == "__main__":
-    X, scaler = load_data(f"{PREFIX}/factors.csv")
+    X, scaler = load_data(f"{PREFIX}/factors_anisotropic_synth.csv")
     print(f"experiment id: {_exp}")
     _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
 

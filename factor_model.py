@@ -8,12 +8,11 @@ import pandas as pd
 from scipy.stats import t as scipy_t
 
 with open("cfg.yaml") as f:
-    _exp = yaml.safe_load(f)["experiment_name"]
-PREFIX = f"model/{_exp}"
-with open(f"{PREFIX}/cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
 
-FEATURES: list[str] = [f for f in _cfg["factor_names"] if f != "market"]
+_exp = _cfg["experiment_name"]
+PREFIX = f"model/{_exp}"
+FEATURES: list[str] = _cfg['train']['factor_names']
 
 
 def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
@@ -243,7 +242,7 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
             noise[:, s] = np.random.randn(N)
 
     idiosyncratic = noise * model.res_std
-    return systematic + idiosyncratic
+    return systematic
 
 
 def save_model(model: FactorModel, prefix: str) -> None:

@@ -23,7 +23,7 @@ Historical = np.array([
 ])
 
 
-def anisotropic_corr(C_hist, p=2.0):
+def anisotropic_corr(C_hist, p=5.0):
     vals, vecs = np.linalg.eigh(C_hist)
     vals = vals[::-1];
     vecs = vecs[:, ::-1]
@@ -37,7 +37,7 @@ def anisotropic_corr(C_hist, p=2.0):
     return C_new / np.outer(d, d)
 
 
-def amplify_corr(C_hist, beta=2.5):
+def amplify_corr(C_hist, beta=4):
   n = C_hist.shape[0]
   lam_min = np.linalg.eigvalsh(C_hist).min()
   beta_max = 1.0 / (1.0 - lam_min) * 0.99   # 留一点 margin

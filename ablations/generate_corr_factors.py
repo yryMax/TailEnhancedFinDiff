@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-with open("cfg.yaml") as f:
+with open("../cfg.yaml") as f:
     _exp = yaml.safe_load(f)["experiment_name"]
 PREFIX = f"model/{_exp}"
 
@@ -46,7 +46,7 @@ def amplify_corr(C_hist, beta=4):
   return beta * C_hist + (1 - beta) * np.eye(n)
 
 
-with open("cfg.yaml") as f:
+with open("../cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
 
 _exp = _cfg["experiment_name"]

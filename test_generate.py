@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 import matplotlib.pyplot as plt
-from factor_diffusion_train import FactorDenoiser
+from factor_diffusion_train import build_factor_denoiser
 import yaml
 from factor_diffusion_sample import generate
 
@@ -13,11 +13,12 @@ with open(f"{PREFIX}/cfg.yaml") as f:
     _cfg = yaml.safe_load(f)
 
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-NUM_TIMESTEPS = _cfg["num_timesteps"]
-LEVY_ALPHA    = _cfg["levy_alpha"]
-FACTOR_NAMES  = _cfg["factor_names"]
+FACTOR_NAMES  = _cfg["factors"]
 FACTOR_DIM    = len(FACTOR_NAMES)
 CHECKPOINT    = f"{PREFIX}/checkpoints/{_cfg['ckpt_name']}.pt"
+
+# cfg passed to generate(); test-only batch size keeps runtime small.
+GEN_CFG = {**_cfg, "batch_size": min(_cfg["batch_size"], 128)}
 
 N_SAMPLES = 128
 VOL_IDX   = FACTOR_NAMES.index("volatility")
@@ -65,7 +66,7 @@ def plot_var_grad(var_history, grad_history, title="DLPM reverse-process diagnos
 @pytest.fixture(scope="module")
 def artifacts():
     ckpt  = torch.load(CHECKPOINT, map_location=DEVICE, weights_only=False)
-    model = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
+    model = build_factor_denoiser(ckpt["model_kwargs"], ckpt["model_state"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     return model, ckpt["scaler"]
 
@@ -92,14 +93,14 @@ def _make_interval_cond(lo_norm, hi_norm, idx):
 def test_demo(artifacts):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, GEN_CFG, num_samples=N_SAMPLES)
 
     q1        = np.percentile(uncon, 1, axis=0)
     q1_norm   = _to_norm(scaler, q1[VOL_IDX],   VOL_IDX)
 
     cf = _make_interval_cond(None, q1_norm, VOL_IDX)
     lo, var_history, grad_history = generate(
-        model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+        model, scaler, GEN_CFG,
         cond_fn=cf, guidance_scale=5.0, num_samples=N_SAMPLES
     )
 
@@ -111,7 +112,7 @@ def test_demo(artifacts):
 def test_conditional_single(artifacts):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, GEN_CFG, num_samples=N_SAMPLES)
 
     q5  = np.percentile(uncon, 5,  axis=0)
     q95 = np.percentile(uncon, 95, axis=0)
@@ -122,10 +123,10 @@ def test_conditional_single(artifacts):
         q5_norm  = _to_norm(scaler, q5[i],  i)
         q95_norm = _to_norm(scaler, q95[i], i)
 
-        lo, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+        lo, _, _ = generate(model, scaler, GEN_CFG,
                             cond_fn=_make_interval_cond(None, q5_norm, i),
                             guidance_scale=5.0, num_samples=N_SAMPLES)
-        hi, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+        hi, _, _ = generate(model, scaler, GEN_CFG,
                             cond_fn=_make_interval_cond(q95_norm, None, i),
                             guidance_scale=5.0, num_samples=N_SAMPLES)
 
@@ -146,7 +147,7 @@ def test_conditional_single(artifacts):
 def test_double(artifacts, plo, phi):
     model, scaler = artifacts
 
-    uncon, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS, num_samples=N_SAMPLES)
+    uncon, _, _ = generate(model, scaler, GEN_CFG, num_samples=N_SAMPLES)
 
     lo_bound = np.percentile(uncon, plo, axis=0)
     hi_bound = np.percentile(uncon, phi, axis=0)
@@ -157,7 +158,7 @@ def test_double(artifacts, plo, phi):
         lo_norm = _to_norm(scaler, lo_bound[i], i)
         hi_norm = _to_norm(scaler, hi_bound[i], i)
 
-        guided, _, _ = generate(model, scaler, LEVY_ALPHA, NUM_TIMESTEPS,
+        guided, _, _ = generate(model, scaler, GEN_CFG,
                                 cond_fn=_make_interval_cond(lo_norm, hi_norm, i),
                                 guidance_scale=5.0, num_samples=N_SAMPLES)
 

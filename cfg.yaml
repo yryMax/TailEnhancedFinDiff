@@ -1,4 +1,0 @@
-experiment_name: DDPM
-
-train:
-  factor_names: [market, growth, momentum, quality, size, value, volatility]

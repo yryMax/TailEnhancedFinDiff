@@ -3,8 +3,12 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 import torch
+
+from factor_diffusion_train import FactorDenoiser
 from factor_model import FactorModel, reconstruct_returns
 from collections.abc import Callable
+
+
 class FactorSampler(ABC):
     @abstractmethod
     def generate(self, num_generate: int) -> np.ndarray:
@@ -107,8 +111,8 @@ class GaussianSampler(FactorSampler):
         return np.stack(accepted[:num_generate])
 
 class DiffusionSampler(FactorSampler):
-    def __init__(self, checkpoint_path: str, device: str = None, guidance_scale: float = 1.0):
-        from factor_diffusion_train import FactorDenoiser
+    def __init__(self, checkpoint_path: str, cfg, device: str = None,
+                 guidance_scale: float = 1.0):
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
@@ -117,16 +121,18 @@ class DiffusionSampler(FactorSampler):
         self.scaler = ckpt["scaler"]
         self.L = ckpt.get("L_noise")
         self.guidance_scale = guidance_scale
+        self.cfg = cfg
 
     def generate(self, num_generate: int) -> np.ndarray:
         from factor_diffusion_sample import generate
-        samples, _, _ = generate(self.model, self.scaler, num_samples=num_generate, L=self.L)
+        samples, _, _ = generate(self.model, self.scaler, self.cfg,
+                                 num_samples=num_generate, L=self.L)
         return samples
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         from factor_diffusion_sample import generate
         samples, _, _ = generate(
-            self.model, self.scaler, num_samples=num_generate,
+            self.model, self.scaler, self.cfg, num_samples=num_generate,
             cond_fn=cond_fn, guidance_scale=self.guidance_scale, L=self.L,
         )
         return samples

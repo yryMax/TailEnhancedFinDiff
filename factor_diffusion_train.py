@@ -1,3 +1,4 @@
+import argparse
 import os
 import yaml
 import numpy as np
@@ -9,29 +10,18 @@ from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from sklearn.preprocessing import StandardScaler
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
-
+import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("cfg.yaml") as f:
-    _exp = yaml.safe_load(f)["experiment_name"]
-PREFIX = f"model/{_exp}"
-with open(f"{PREFIX}/cfg.yaml") as f:
-    _cfg = yaml.safe_load(f)
 
-FACTOR_NAMES  = _cfg["factor_names"]
-EPOCHS        = _cfg["epochs"]
-BATCH_SIZE    = _cfg["batch_size"]
-LR            = _cfg["lr"]
-NUM_TIMESTEPS = _cfg["num_timesteps"]
-LEVY_ALPHA    = _cfg["levy_alpha"]
-MC_OUTER      = _cfg["mc_outer"]
-MC_INNER      = _cfg["mc_inner"]
-CKPT_NAME     = _cfg["ckpt_name"]
-USE_L_NOISE   = _cfg.get("use_L_noise", False)
+def load_cfg(exp_name: str) -> dict:
+    """Load model/<exp_name>/cfg.yaml. Pure function — no side effects."""
+    with open(f"model/{exp_name}/cfg.yaml") as f:
+        return yaml.safe_load(f)
 
 
-def load_data(csv_path):
-    X = pd.read_csv(csv_path, index_col=0)[FACTOR_NAMES].dropna().values.astype(np.float32)
+def load_data(csv_path, factor_names):
+    X = pd.read_csv(csv_path, index_col=0)[factor_names].dropna().values.astype(np.float32)
     scaler = StandardScaler().fit(X)
     X_norm = scaler.transform(X)
     return X_norm, scaler
@@ -43,18 +33,20 @@ class FactorDenoiser(nn.Module):
     Predicts the noise eps_t given noisy input x_t and timestep t.
 
     Each factor is treated as a token; timestep is injected via AdaLN conditioning.
+    :param num_factors: number of factor tokens (D)
     :param dim: token embedding dimension
     :param n_heads: number of attention heads
     :param cond_dim: timestep embedding dimension
     :param num_blocks: number of transformer blocks
     """
-    def __init__(self, dim=64, n_heads=4, cond_dim=128, num_blocks=2):
+    def __init__(self, num_factors, dim=64, n_heads=4, cond_dim=128, num_blocks=2):
         super().__init__()
-        self.kwargs = dict(dim=dim, n_heads=n_heads, cond_dim=cond_dim, num_blocks=num_blocks)
+        self.kwargs = dict(num_factors=num_factors, dim=dim, n_heads=n_heads,
+                           cond_dim=cond_dim, num_blocks=num_blocks)
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
         self.in_proj = nn.Linear(1, dim)                                        # scalar → token
-        self.feature_embed = nn.Parameter(torch.randn(1, len(FACTOR_NAMES), dim) * 0.02)  # learnable factor id
+        self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # learnable factor id
         self.blocks = nn.ModuleList([
             BasicTransformerBlock(
                 dim=dim, num_attention_heads=n_heads, attention_head_dim=dim // n_heads,
@@ -122,29 +114,45 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     return loss.mean()
 
 
-def train(model, loader, bargammas, barsigmas, optimizer, scaler, L=None):
-    import matplotlib.pyplot as plt
-    os.makedirs("checkpoints", exist_ok=True)
-    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+def train(model, loader, optimizer, scaler, cfg, ckpt_path,
+          L=None, loss_plot_path="assets/factor_loss.png"):
+    """
+    Train DLPM denoiser.
 
+    :param model: FactorDenoiser
+    :param loader: DataLoader yielding (x,) batches
+    :param optimizer: torch optimizer
+    :param scaler: fitted StandardScaler (saved into ckpt)
+    :param cfg: dict with epochs, num_timesteps, levy_alpha, mc_outer, mc_inner
+    :param ckpt_path: full path to write checkpoint
+    :param L: optional Cholesky factor for L-noise
+    """
+
+    epochs        = cfg["epochs"]
+    num_timesteps = cfg["num_timesteps"]
+    levy_alpha    = cfg["levy_alpha"]
+    mc_outer      = cfg["mc_outer"]
+    mc_inner      = cfg["mc_inner"]
+
+    _, bargammas, _, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
     bargammas_d = bargammas.to(DEVICE)
     barsigmas_d = barsigmas.to(DEVICE)
     L_d         = L.to(DEVICE) if L is not None else None
-    losses = []
 
-    for epoch in range(1, EPOCHS + 1):
+    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    losses   = []
+
+    for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
         for (x,) in loader:
             x   = x.to(DEVICE)
-            t   = torch.randint(1, NUM_TIMESTEPS, (x.size(0),), device=DEVICE)
+            t   = torch.randint(1, num_timesteps, (x.size(0),), device=DEVICE)
             bg  = bargammas_d[t].unsqueeze(-1)
             bs  = barsigmas_d[t].unsqueeze(-1)
 
-            loss = dlpm_loss(model, x, t, bg, bs, LEVY_ALPHA, MC_OUTER, MC_INNER, DEVICE, L=L_d)
+            loss = dlpm_loss(model, x, t, bg, bs, levy_alpha, mc_outer, mc_inner, DEVICE, L=L_d)
 
-            # use huber_loss can panelty the extreme value
-            # loss = nn.functional.huber_loss(pred_noise, eps_t, reduction='mean', delta=3.0)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -153,45 +161,50 @@ def train(model, loader, bargammas, barsigmas, optimizer, scaler, L=None):
 
         lr_sched.step()
         losses.append(epoch_loss / len(loader.dataset))
-        print(f"Epoch [{epoch:4d}/{EPOCHS}]  loss={losses[-1]:.6f}")
+        print(f"Epoch [{epoch:4d}/{epochs}]  loss={losses[-1]:.6f}")
 
-    os.makedirs(f"{PREFIX}/checkpoints", exist_ok=True)
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     torch.save({
         "model_state":   model.state_dict(),
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
-        "levy_alpha":    LEVY_ALPHA,
-        "num_timesteps": NUM_TIMESTEPS,
-        "L_noise":       (L.detach().cpu() if L is not None else None),
-    }, f"{PREFIX}/checkpoints/{CKPT_NAME}.pt")
+        "cfg":           cfg
+    }, ckpt_path)
 
-    # save the loss plot
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(range(1, EPOCHS + 1), losses)
+    ax.plot(range(1, epochs + 1), losses)
     ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
-    ax.set_title(f"Training Loss")
+    ax.set_title("Training Loss")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig("assets/factor_loss.png", dpi=150)
+    os.makedirs(os.path.dirname(loss_plot_path) or ".", exist_ok=True)
+    fig.savefig(loss_plot_path, dpi=150)
     plt.close(fig)
 
 
 if __name__ == "__main__":
-    DATA_FILE = _cfg.get("data_file", "factors_amplified_synth.csv")
-    X, scaler = load_data(f"{PREFIX}/{DATA_FILE}")
-    print(f"data file: {DATA_FILE}")
-    print(f"experiment id: {_exp}")
-    _, bargammas, _, barsigmas = levy_noise_schedule(LEVY_ALPHA, NUM_TIMESTEPS)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("exp_name", help="experiment name; reads model/<exp_name>/cfg.yaml")
+    args = parser.parse_args()
+
+    cfg    = load_cfg(args.exp_name)
+    prefix = f"model/{args.exp_name}"
+
+    data_file = cfg.get("data_file")
+    X, scaler = load_data(f"{prefix}/{data_file}", cfg["factors"])
+    print(f"data file: {data_file}")
+    print(f"experiment id: {args.exp_name}")
 
     L = None
-    if USE_L_NOISE:
+    if cfg.get("use_L_noise", False):
         C = np.corrcoef(X, rowvar=False).astype(np.float32)
         L = torch.from_numpy(np.linalg.cholesky(C))
         print(f"use_L_noise=True, L shape={tuple(L.shape)}, "
               f"max|C-LL^T|={np.abs(C - (L.numpy() @ L.numpy().T)).max():.2e}")
 
-    loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=BATCH_SIZE, shuffle=True)
-    model     = FactorDenoiser().to(DEVICE)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=cfg["batch_size"], shuffle=True)
+    model     = FactorDenoiser(num_factors=len(cfg["factors"])).to(DEVICE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
 
-    train(model, loader, bargammas, barsigmas, optimizer, scaler, L=L)
+    ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
+    train(model, loader, optimizer, scaler, cfg, ckpt_path, L=L)

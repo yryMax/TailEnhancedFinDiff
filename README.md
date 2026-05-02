@@ -53,17 +53,9 @@ After running `factor_model.py`, the derived folder should be structured as foll
 ```
 
 ### TRAINING
-
-1. Edit `cfg.yaml` to configure hyperparameters before running
-2. run `python factor_model.py` to fit the betas and residuals according to the provided parquet,
-   do this for training data and test data separately.
-3. run `python factor_diffusion_train.py` to train the diffusion model
-
-The default config is trained on RTX 4080 mobile(16GB) with 200 epochs and 100 timestamps.
-training and sampling take within minutes, but you definitely need a GPU to train.
-
-After training the achievements in saved under PREFIX/checkpoints.
-
+`python init_experiment.py exp_name`
+`python factor_model.py exp_name`
+`python factor_diffusion_train.py exp_name`
 **Some tips on hyperparameters**
 
 - `levy_alpha` controls how much the model focus on the tail behavior, the less it is the more it focuses on the tail,
@@ -77,7 +69,7 @@ After training the achievements in saved under PREFIX/checkpoints.
 ### SAMPLING
 
 1. Edit `cfg.yaml` to configure number of samples
-2. run `python factor_diffusion_sample.py` , the output is a .npy under /samples of your training directory
+2. run `python factor_diffusion_sample.py exp_name` , the output is a .npy under /samples of your training directory
 
 ### EVALUATION
 

@@ -1,4 +1,0 @@
-experiment_name: ablation
-
-train:
-  factor_names: [growth, momentum, quality, size, value, volatility]

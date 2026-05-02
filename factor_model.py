@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass, field
 import yaml
@@ -7,30 +8,24 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t as scipy_t
 
-with open("cfg.yaml") as f:
-    _exp = yaml.safe_load(f)["experiment_name"]
-PREFIX = f"model/{_exp}"
-with open(f"{PREFIX}/cfg.yaml") as f:
-    _cfg = yaml.safe_load(f)
 
-FEATURES: list[str] = [f for f in _cfg["factor_names"] if f != "market"]
-
-
-def _pivot(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+def _pivot(df: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """
     Pivot panel data into wide-format matrices. Dates are sorted by pivot; output may contain NaN.
-    :param df:    panel DataFrame with columns [date, csecid, returns, *FEATURES]
+    :param df:       panel DataFrame with columns [date, csecid, returns, *features]
+    :param features: factor names to pivot
     :return:      R     : (T, S) stock returns pivot
                   chars : dict mapping each feature name to its (T, S) characteristic pivot
     """
     R = df.pivot_table(index="date", columns="csecid", values="returns")
-    chars = {f: df.pivot_table(index="date", columns="csecid", values=f) for f in FEATURES}
+    chars = {f: df.pivot_table(index="date", columns="csecid", values=f) for f in features}
     return R, chars
 
-def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_regression_factors(df: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Cross-sectional OLS each period: R_t = B_{t-1} * f_t + eps
-    :param df: the pivot return value on sectional stocks
+    :param df:       the pivot return value on sectional stocks
+    :param features: factor names
     :return:   R : (T, S) stock (backward) returns pivot
     F : (T-1, K+1) factor returns, columns = ['alpha', 'market', *FACTORS]
         alpha column is a constant 1.0 (intercept of the second-stage OLS in fit_beta)
@@ -38,7 +33,7 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     """
 
 
-    R, chars = _pivot(df)
+    R, chars = _pivot(df, features)
     dates = sorted(R.index.unique())
 
     rows, valid_dates = [], []
@@ -46,7 +41,7 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         date, prev_date = dates[i], dates[i - 1]
 
         R_t = R.loc[date].sort_index()
-        B_cols = [chars[f].loc[prev_date].sort_index() for f in FEATURES]
+        B_cols = [chars[f].loc[prev_date].sort_index() for f in features]
         B_df = pd.concat(B_cols, axis=1)
 
         mask = R_t.notna() & B_df.notna().all(axis=1)
@@ -57,31 +52,32 @@ def build_regression_factors(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         rows.append(f_t)
         valid_dates.append(prev_date)
 
-    F = pd.DataFrame(rows, index=valid_dates, columns=["market"] + FEATURES)
+    F = pd.DataFrame(rows, index=valid_dates, columns=["market"] + features)
     F.insert(0, "alpha", 1.0)   # constant intercept column for fit_beta
     return R, F
 
 
-def build_portsort_factors(df: pd.DataFrame, N_QUANTILES = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_portsort_factors(df: pd.DataFrame, features: list[str], N_QUANTILES = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Portfolio-sort factor construction: long–short spread (top quantile – bottom quantile) per factor each period.
-    :param df:          panel DataFrame with columns [date, csecid, returns, *FEATURES]
+    :param df:          panel DataFrame with columns [date, csecid, returns, *features]
+    :param features:    factor names
     :param N_QUANTILES: number of quantile buckets for sorting
     :return:            R : (T, S) stock returns pivot
-                        F : (T-1, K) factor returns, columns = FEATURES
+                        F : (T-1, K) factor returns, columns = features
                             no alpha column — port-sort factors are zero-investment spreads
     """
-    R, chars = _pivot(df)
+    R, chars = _pivot(df, features)
     dates = sorted(R.index.unique())
 
-    spreads: dict[str, list] = {f: [] for f in FEATURES}
+    spreads: dict[str, list] = {f: [] for f in features}
     valid_dates = []
 
     for i in range(1, len(dates)):
         date, prev_date = dates[i], dates[i - 1]
         R_t = R.loc[date]
 
-        for f in FEATURES:
+        for f in features:
             char_prev = chars[f].loc[prev_date]
             mask = R_t.notna() & char_prev.notna()
             r, c = R_t[mask], char_prev[mask]
@@ -253,14 +249,26 @@ def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
 
 
-def get_factor_model(path: str) -> FactorModel:
+def get_factor_model(path: str, features: list[str]) -> FactorModel:
     df   = pd.read_parquet(path)
-    R, F = build_regression_factors(df)
+    R, F = build_regression_factors(df, features)
     model = fit_beta(F, R, path)
     return model
 
 
 if __name__ == '__main__':
-    print(f"Factor model on {PREFIX}")
-    get_factor_model("data/train24y.parquet").save(PREFIX)
-    get_factor_model("data/test1y.parquet").save(f"{PREFIX}/test")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("exp_name", help="experiment name; reads model/<exp_name>/cfg.yaml")
+    args = parser.parse_args()
+
+    prefix = f"model/{args.exp_name}"
+    with open(f"{prefix}/cfg.yaml") as f:
+        cfg = yaml.safe_load(f)
+
+    features   = cfg["characteristics"]
+    train_path = cfg["train_path"]
+    test_path  = cfg["test_path"]
+
+    print(f"Factor model on {prefix}  (train={train_path}, test={test_path})")
+    get_factor_model(train_path, features).save(prefix)
+    get_factor_model(test_path,  features).save(f"{prefix}/test")

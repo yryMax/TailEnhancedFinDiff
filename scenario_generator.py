@@ -61,7 +61,6 @@ class ResampleSampler(FactorSampler):
                 if len(accepted) >= num_generate:
                     break
         rate = len(accepted) / max(n_tried, 1)
-        print(f"[ResampleSampler] accepted {len(accepted)}/{n_tried}  (rate={rate:.4f})")
         if not accepted:
             return np.empty((0, D))
         return np.stack(accepted[:num_generate])
@@ -105,14 +104,13 @@ class GaussianSampler(FactorSampler):
                 if len(accepted) >= num_generate:
                     break
         rate = len(accepted) / max(n_tried, 1)
-        print(f"[GaussianSampler] accepted {len(accepted)}/{n_tried}  (rate={rate:.4f})")
         if not accepted:
             return np.empty((0, D))
         return np.stack(accepted[:num_generate])
 
 class DiffusionSampler(FactorSampler):
-    def __init__(self, checkpoint_path: str, cfg, device: str = None,
-                 guidance_scale: float = 1.0):
+    def __init__(self, checkpoint_path: str, device: str = None,
+                 guidance_scale: float = 1.0, guidance_decay_pow: float = 1.0):
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
@@ -121,7 +119,8 @@ class DiffusionSampler(FactorSampler):
         self.scaler = ckpt["scaler"]
         self.L = ckpt.get("L_noise")
         self.guidance_scale = guidance_scale
-        self.cfg = cfg
+        self.guidance_decay_pow = guidance_decay_pow
+        self.cfg = ckpt["cfg"]
 
     def generate(self, num_generate: int) -> np.ndarray:
         from factor_diffusion_sample import generate
@@ -133,7 +132,8 @@ class DiffusionSampler(FactorSampler):
         from factor_diffusion_sample import generate
         samples, _, _ = generate(
             self.model, self.scaler, self.cfg, num_samples=num_generate,
-            cond_fn=cond_fn, guidance_scale=self.guidance_scale, L=self.L,
+            cond_fn=cond_fn, guidance_scale=self.guidance_scale,
+            guidance_decay_pow=self.guidance_decay_pow, L=self.L,
         )
         return samples
 

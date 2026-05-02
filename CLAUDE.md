@@ -329,6 +329,15 @@ Existing checkpoints were back-patched with the correct values so no retraining 
 
 After fix, with `EXP=DDPM` (or any EXP), `DiffusionSampler` always uses `levy_alpha=2.0` from the checkpoint. Generated kurtosis per factor: [6.2, 3.2, 4.1, 3.9, 3.5, 7.7, 2.6] — consistent with real data (target ≈ 7–15).
 
+## Status: Resolved (cfg refactor)
+
+The `EXP` env var path no longer exists. After the global `_cfg` refactor:
+
+- `factor_diffusion_sample.generate()` takes `cfg` as an explicit argument and reads `levy_alpha`, `num_timesteps`, `batch_size` from it directly — no module-level constants, no env-var lookup at import time.
+- `DiffusionSampler.__init__` loads `self.cfg = ckpt["cfg"]` from the checkpoint and threads it through every `generate()` call.
+
+So inference is structurally guaranteed to use the schedule baked into the checkpoint. The `levy_alpha` / `num_timesteps` keyword args described in the original three-part fix are no longer needed and have been removed; the cfg dict carries them.
+
 ---
 
 # Conditional Generation: Missing Cross-Factor Co-movement
@@ -384,5 +393,51 @@ The guidance vector is **zero on every coordinate except `vol`**. So guidance on
 - Guidance gradient (the detach is here): `factor_diffusion_sample.generate()` — search for `eps_pred` and `grad`.
 - Reference behavior: `factor_diffusion_sample.generate_rejection()`, `GaussianSampler` in `scenario_generator.py`.
 - Reproduction notebook: `conditional_evaluation.ipynb`, In[15] (histogram across methods) and In[19] (per-factor KDE grid showing flat non-vol marginals for Diffusion row vs. shifted marginals for Rejection / Gaussian rows).
+
+---
+
+# SNR-Weighted Guidance Schedule
+
+## Problem with the Hard Cutoff
+
+`generate()` previously gated guidance by `1 < t < (T - 30)` — a binary on/off mask. The 30-step skip at high $t$ exists because $\hat x_0 = (x_t - \bar\sigma_t\,\hat\varepsilon)/\bar\gamma_t$ is unreliable when $\bar\sigma_t$ is large (denoiser is far OOD), so the energy gradient $\nabla L(\hat x_0)$ would push $x_t$ in nonsense directions and amplify under `1/gammas[t]`. But a hard cutoff is brittle: 30 is hand-tuned, and there's no smooth transition between "guidance off" and "full strength."
+
+## First Attempt: `bargammas[t]^p` (didn't work)
+
+Replace the mask with $w_t = \bar\gamma_t^p$ as a multiplier on the guidance update:
+
+$$\mu_t \leftarrow \mu_t - s\cdot w_t\cdot \mathrm{var}_t \cdot \nabla L(\hat x_0)$$
+
+This decays guidance smoothly at high noise (since $\bar\gamma_t \to 0$ as $t \to T$). But for $p \geq 3$ the histogram of conditioned samples collapses to the unconditional distribution. Reason: $\bar\gamma_t \in (0,1)$ raised to a high power kills $w_t$ everywhere except the very last few steps, *and* those last steps also have small $\mathrm{var}_t = \Gamma_t \Sigma_{t-1}$ — so the product $w_t\cdot \mathrm{var}_t$ is squashed at both ends and the middle, integrating to ≈ 0.
+
+## Fix: SNR-Based Weighting (Karras/EDM-style)
+
+Use the Bayes-optimal denoiser weight from the EDM family:
+
+$$w_t = \left(\frac{\mathrm{SNR}_t}{\mathrm{SNR}_t + 1}\right)^p, \qquad \mathrm{SNR}_t = \frac{\bar\gamma_t^2}{\bar\sigma_t^2}$$
+
+Properties:
+
+- **Saturates to 1** at low noise ($\mathrm{SNR}_t \to \infty$), so guidance is full-strength where $\hat x_0$ is trustworthy.
+- **Goes to 0** at high noise ($\mathrm{SNR}_t \to 0$), naturally suppressing the OOD regime.
+- **Sigmoid-shaped transition** in the middle — no collapse like $\bar\gamma_t^p$.
+- **Theoretically motivated**: $w_t$ is exactly the weight on $x_t/\bar\gamma_t$ in the Bayes-optimal $\hat x_0(x_t)$ assuming a unit-variance Gaussian prior. So guidance is weighted by "how much the denoiser actually trusts the data term at step $t$."
+
+For DDPM ($\alpha=2$), $\bar\gamma_t^2 + \bar\sigma_t^2 = 1$, so $w_t = \bar\gamma_t^2 = \bar\alpha_t$ — the standard SNR weight.
+
+For DLPM ($\alpha<2$), the constraint is $\bar\gamma_t^\alpha + \bar\sigma_t^\alpha = 1$ (α-norm), so $\bar\gamma_t^2 + \bar\sigma_t^2 \neq 1$. The 2-norm SNR is still the right form because the *posterior* of $\hat x_0 \mid x_t, A$ is Gaussian (conditioned on the subordinator chain) — variance addition is in 2-norm.
+
+## Knobs
+
+- `guidance_decay_pow=1.0` (default): canonical SNR weight.
+- `guidance_decay_pow=0.0`: disable decay (guidance applied uniformly, only `t > 1` mask).
+- `guidance_decay_pow > 1`: sharpen the high-noise cutoff while preserving the sigmoid shape.
+- Tune `guidance_scale` *first* for total strength; tune `guidance_decay_pow` *second* for the temporal distribution. They are orthogonal knobs.
+
+## Code Waypoints
+
+- Weight computation: `factor_diffusion_sample.generate()` — `snr_t = bargammas[t]**2 / barsigmas[t]**2; w_t = (snr_t / (snr_t + 1))**guidance_decay_pow`.
+- Threading from sampler API: `DiffusionSampler.__init__(guidance_decay_pow=...)` in `scenario_generator.py`.
+- `grad_history` now logs `(t, grad_mean, grad_max, w_t)` so you can plot the effective schedule.
 
 ---

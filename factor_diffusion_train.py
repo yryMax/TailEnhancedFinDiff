@@ -39,7 +39,7 @@ class FactorDenoiser(nn.Module):
     :param cond_dim: timestep embedding dimension
     :param num_blocks: number of transformer blocks
     """
-    def __init__(self, num_factors, dim=64, n_heads=4, cond_dim=128, num_blocks=2):
+    def __init__(self, num_factors, dim=128, n_heads=8, cond_dim=128, num_blocks=6):
         super().__init__()
         self.kwargs = dict(num_factors=num_factors, dim=dim, n_heads=n_heads,
                            cond_dim=cond_dim, num_blocks=num_blocks)
@@ -168,7 +168,8 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
         "model_state":   model.state_dict(),
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
-        "cfg":           cfg
+        "cfg":           cfg,
+        "L_noise":       L.detach().cpu() if L is not None else None,
     }, ckpt_path)
 
     fig, ax = plt.subplots(figsize=(8, 4))

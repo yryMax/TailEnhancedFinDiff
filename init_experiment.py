@@ -17,16 +17,16 @@ DEFAULT_CFG = {
     "train_path":    "data/train24y.parquet",
     "test_path":     "data/test1y.parquet",
     "data_file":     "factors.csv",
-    "epochs":        100,
+    "epochs":        200,
     "batch_size":    64,
     "lr":            1.0e-4,
     "num_timesteps": 100,
-    "levy_alpha":    1.9,
-    "mc_outer":      5,
+    "levy_alpha":    2.0,
+    "mc_outer":      1,
     "mc_inner":      1,
-    "ckpt_name":     "DLPM",
+    "ckpt_name":     "DDPM_vanilla",
     "num_generate":  4096,
-    "use_L_noise":   True,
+    "use_L_noise":   False,
 }
 
 SUBDIRS = ["checkpoints", "samples", "test"]

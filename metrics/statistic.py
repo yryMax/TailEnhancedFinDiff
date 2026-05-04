@@ -81,6 +81,21 @@ def compute_cov(X: np.ndarray, Y: np.ndarray) -> float:
     return float(np.linalg.norm(cov_X - cov_Y, 'fro') / np.linalg.norm(cov_Y, 'fro'))
 
 
+@registry.register('Corr')
+def compute_corr(X: np.ndarray, Y: np.ndarray, min_samples: int = 2) -> float:
+    """MAE between correlation matrices, off-diagonal upper triangle only."""
+    mask = _valid_mask(Y, min_samples=min_samples)
+    X_v, Y_v = X[:, mask], Y[:, mask]
+    cov_X, cov_Y = _nancovariance(X_v), _nancovariance(Y_v)
+    std_X = np.sqrt(np.clip(np.diag(cov_X), 0.0, None))
+    std_Y = np.sqrt(np.clip(np.diag(cov_Y), 0.0, None))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        corr_X = np.where(np.outer(std_X, std_X) > 0, cov_X / np.outer(std_X, std_X), 0.0)
+        corr_Y = np.where(np.outer(std_Y, std_Y) > 0, cov_Y / np.outer(std_Y, std_Y), 0.0)
+    triu = np.triu(np.ones_like(corr_Y, dtype=bool), k=1)
+    return float(np.abs(corr_X[triu] - corr_Y[triu]).mean()) if triu.any() else np.nan
+
+
 @registry.register('ES')
 def compute_es(X: np.ndarray, Y: np.ndarray, alpha: float = 0.05) -> dict:
     """ES per asset (5th percentile tail mean), mean±std across assets."""

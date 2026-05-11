@@ -32,7 +32,6 @@ def build_regression_factors(df: pd.DataFrame, features: list[str]) -> tuple[pd.
         we assume market is a factor return and the corresponding factor loader is 1
     """
 
-
     R, chars = _pivot(df, features)
     dates = sorted(R.index.unique())
 

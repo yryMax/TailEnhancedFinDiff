@@ -62,17 +62,17 @@ class FactorDenoiser(nn.Module):
     Factorized denoiser for factor-return time series.
     Predicts noise eps_t given noisy input x_t (B, F, T) and timestep t.
 
-    Each block alternates two pathways:
-      • Temporal: dilated 1D conv along T, per factor
-      • Cross-factor: BasicTransformerBlock self-attention over F at each t,
-                      with AdaLN timestep conditioning
+    Two sequential stages:
+      • Stage 1: stack of dilated 1D convs along T, per factor
+      • Stage 2: stack of BasicTransformerBlock self-attention over F at each t,
+                 with AdaLN timestep conditioning
 
     :param num_factors: number of factor channels F
     :param seq_len:     temporal length T
     :param dim:         token embedding dimension
     :param n_heads:     attention heads
     :param cond_dim:    timestep embedding dimension
-    :param num_blocks:  number of (conv + attn) blocks
+    :param num_blocks:  number of conv blocks AND attn blocks (each stage has num_blocks)
     :param dilations:   dilation rates for the temporal conv stack
     """
     def __init__(self, num_factors, seq_len, dim=128, n_heads=8, cond_dim=128,

@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from sklearn.preprocessing import StandardScaler
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
@@ -40,21 +39,73 @@ def load_data(csv_path, factor_names, seq_len):
     return np.ascontiguousarray(windows), scaler
 
 
-class TemporalConvBlock(nn.Module):
-    """
-    Dilated 1D conv block along time, applied independently per (batch, factor).
-    Multi-scale receptive field via dilations; residual via 1×1 conv.
-    """
+class AdaLayerNorm(nn.Module):
+    """LayerNorm with affine params predicted from a conditioning vector (zero-init = identity)."""
+    def __init__(self, dim, cond_dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.proj = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, dim * 2))
+        nn.init.zeros_(self.proj[-1].weight)
+        nn.init.zeros_(self.proj[-1].bias)
+
+    def forward(self, x, cond):
+        gb = self.proj(cond)
+        while gb.dim() < x.dim():
+            gb = gb.unsqueeze(1)
+        g, b = gb.chunk(2, dim=-1)
+        return self.norm(x) * (1 + g) + b
+
+
+class DilatedTemporalConv(nn.Module):
+    """Dilated 1D conv along time, per (batch, factor). Multi-scale RF + residual."""
     def __init__(self, dim, dilations=(1, 2, 4)):
         super().__init__()
         layers = []
         for d in dilations:
             layers += [nn.Conv1d(dim, dim, kernel_size=3, padding=d, dilation=d), nn.GELU()]
-        self.net = nn.Sequential(*layers[:-1])          # drop trailing GELU
+        self.net = nn.Sequential(*layers[:-1])
         self.res = nn.Conv1d(dim, dim, kernel_size=1)
 
     def forward(self, x):                                # x: (B*F, dim, T)
         return self.net(x) + self.res(x)
+
+
+class FactorBlock(nn.Module):
+    """
+    One factorized block:
+      Pathway A — temporal conv along T (per factor)
+      Pathway B — cross-factor self-attention along F (per timestep)
+    Both pathways operate on the same input in parallel, are summed onto the residual,
+    then passed through AdaLN → FFN → AdaLN with timestep conditioning.
+    """
+    def __init__(self, dim, cond_dim, n_heads, dilations=(1, 2, 4)):
+        super().__init__()
+        self.t_conv = DilatedTemporalConv(dim, dilations)
+        self.f_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=n_heads, batch_first=True)
+        self.adanorm1 = AdaLayerNorm(dim, cond_dim)
+        self.adanorm2 = AdaLayerNorm(dim, cond_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 2), nn.GELU(), nn.Linear(dim * 2, dim)
+        )
+
+    def forward(self, x, cond):
+        """
+        :param x:    (B, F, T, dim)
+        :param cond: (B, cond_dim)
+        """
+        B, F, T, C = x.shape
+
+        # Pathway A: temporal conv (per factor)
+        x_t   = x.reshape(B * F, T, C).transpose(1, 2)                       # (B*F, dim, T)
+        out_t = self.t_conv(x_t).transpose(1, 2).reshape(B, F, T, C)
+
+        # Pathway B: cross-factor attention (per timestep)
+        x_f   = x.transpose(1, 2).reshape(B * T, F, C)                       # (B*T, F, dim)
+        out_f, _ = self.f_attn(x_f, x_f, x_f, need_weights=False)
+        out_f = out_f.reshape(B, T, F, C).transpose(1, 2)                    # (B, F, T, dim)
+
+        mixed = self.adanorm1(x + out_t + out_f, cond)
+        return self.adanorm2(mixed + self.ffn(mixed), cond)
 
 
 class FactorDenoiser(nn.Module):
@@ -62,18 +113,16 @@ class FactorDenoiser(nn.Module):
     Factorized denoiser for factor-return time series.
     Predicts noise eps_t given noisy input x_t (B, F, T) and timestep t.
 
-    Two sequential stages:
-      • Stage 1: stack of dilated 1D convs along T, per factor
-      • Stage 2: stack of BasicTransformerBlock self-attention over F at each t,
-                 with AdaLN timestep conditioning
+    Stacks `num_blocks` FactorBlocks; each block runs temporal conv and cross-factor
+    attention in parallel and fuses them via AdaLN-conditioned residual + FFN.
 
     :param num_factors: number of factor channels F
     :param seq_len:     temporal length T
     :param dim:         token embedding dimension
     :param n_heads:     attention heads
     :param cond_dim:    timestep embedding dimension
-    :param num_blocks:  number of conv blocks AND attn blocks (each stage has num_blocks)
-    :param dilations:   dilation rates for the temporal conv stack
+    :param num_blocks:  number of FactorBlocks
+    :param dilations:   dilation rates for the temporal conv pathway
     """
     def __init__(self, num_factors, seq_len, dim=128, n_heads=8, cond_dim=128,
                  num_blocks=6, dilations=(1, 2, 4)):
@@ -86,16 +135,11 @@ class FactorDenoiser(nn.Module):
         self.in_proj        = nn.Linear(1, dim)
         self.feature_embed  = nn.Parameter(torch.randn(1, num_factors, 1, dim) * 0.02)
         self.temporal_embed = nn.Parameter(torch.randn(1, 1, seq_len, dim) * 0.02)
-        self.t_convs = nn.ModuleList([TemporalConvBlock(dim, dilations) for _ in range(num_blocks)])
-        self.attn_blocks = nn.ModuleList([
-            BasicTransformerBlock(
-                dim=dim, num_attention_heads=n_heads, attention_head_dim=dim // n_heads,
-                norm_type="ada_norm_continuous",
-                ada_norm_continous_conditioning_embedding_dim=cond_dim,
-            )
-            for _ in range(num_blocks)
+        self.blocks = nn.ModuleList([
+            FactorBlock(dim, cond_dim, n_heads, dilations) for _ in range(num_blocks)
         ])
-        self.out_proj = nn.Linear(dim, 1)
+        self.final_norm = AdaLayerNorm(dim, cond_dim)
+        self.out_proj   = nn.Linear(dim, 1)
 
     def forward(self, x, t):
         """
@@ -103,25 +147,15 @@ class FactorDenoiser(nn.Module):
         :param t: timestep indices, shape (B,)
         :return: predicted noise, shape (B, F, T)
         """
-        B, F, T = x.shape
-        cond   = self.t_embed(self.t_sin(t))                                 # (B, cond_dim)
-        cond_t = cond.unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)       # (B*T, cond_dim)
+        cond = self.t_embed(self.t_sin(t))                                   # (B, cond_dim)
 
         h = self.in_proj(x.unsqueeze(-1))                                    # (B, F, T, dim)
         h = h + self.feature_embed + self.temporal_embed
 
-        # Stage 1: temporal conv stack (per factor)
-        ht = h.reshape(B * F, T, -1).transpose(1, 2)                         # (B*F, dim, T)
-        for tconv in self.t_convs:
-            ht = ht + tconv(ht)                                              # residual
-        h  = ht.transpose(1, 2).reshape(B, F, T, -1)                         # (B, F, T, dim)
+        for block in self.blocks:
+            h = block(h, cond)
 
-        # Stage 2: cross-factor attention stack (per timestep)
-        ha = h.permute(0, 2, 1, 3).reshape(B * T, F, -1)                     # (B*T, F, dim)
-        for attn in self.attn_blocks:
-            ha = attn(ha, added_cond_kwargs={"pooled_text_emb": cond_t})
-        h  = ha.reshape(B, T, F, -1).permute(0, 2, 1, 3).contiguous()        # (B, F, T, dim)
-
+        h = self.final_norm(h, cond)
         return self.out_proj(h).squeeze(-1)                                  # (B, F, T)
 
 def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):

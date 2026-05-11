@@ -8,12 +8,12 @@ FACTOR_NAMES = ['market', 'growth', 'momentum', 'quality', 'size', 'value', 'vol
 SHORT = [n[:3] for n in FACTOR_NAMES]
 
 EXPERIMENTS = [
-    ('synth',       'model/ablation/factors_synth.csv',
-                    'model/ablation/samples/factor_DLPM_synth_4096.npy'),
-    ('amplified',   'model/ablation/factors_amplified_synth.csv',
-                    'model/ablation/samples/factor_DLPM_amplified_4096.npy'),
-    ('anisotropic', 'model/ablation/factors_anisotropic_synth.csv',
-                    'model/ablation/samples/factor_DLPM_anisotropic_4096.npy'),
+    ('synth',       '../model/ablation/factors_synth.csv',
+                    '../model/ablation/samples/factor_DLPM_synth_4096.npy'),
+    ('amplified',   '../model/ablation/factors_amplified_synth.csv',
+                    '../model/ablation/samples/factor_DLPM_amplified_4096.npy'),
+    ('anisotropic', '../model/ablation/factors_anisotropic_synth.csv',
+                    '../model/ablation/samples/factor_DLPM_anisotropic_4096.npy'),
 ]
 
 

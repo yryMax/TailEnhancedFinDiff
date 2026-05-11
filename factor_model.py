@@ -267,8 +267,8 @@ if __name__ == '__main__':
 
     features   = cfg["characteristics"]
     train_path = cfg["train_path"]
-    #test_path  = cfg["test_path"]
+    test_path  = cfg["test_path"]
 
     #print(f"Factor model on {prefix}  (train={train_path}, test={test_path})")
     get_factor_model(train_path, features).save(prefix)
-    #get_factor_model(test_path,  features).save(f"{prefix}/test")
+    get_factor_model(test_path,  features).save(f"{prefix}/test")

@@ -45,6 +45,7 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
     if num_samples is None:
         num_samples = cfg["num_generate"]
     factor_dim = model.feature_embed.shape[1]
+    seq_len    = model.temporal_embed.shape[2]
 
     gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
     T = len(gammas)
@@ -55,6 +56,10 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
 
     L_d = L.to(DEVICE) if L is not None else None
 
+    def _color(z):
+        # L colors only the F axis; temporal correlation is learned by conv.
+        return torch.einsum('fg,bgt->bft', L_d, z) if L_d is not None else z
+
     model.eval()
     batches = []
     var_history = []
@@ -62,7 +67,7 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
 
     for start in range(0, num_samples, batch_size):
         n     = min(batch_size, num_samples - start)
-        shape = (n, factor_dim)
+        shape = (n, factor_dim, seq_len)
 
         A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(T)]
 
@@ -70,9 +75,7 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
         for t in range(1, T):
             Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
 
-        z_init = torch.randn(n, factor_dim, device=DEVICE)
-        if L_d is not None:
-            z_init = z_init @ L_d.T
+        z_init = _color(torch.randn(*shape, device=DEVICE))
         x = Sigmas[-1].sqrt() * z_init
 
         for t in range(T - 1, 0, -1):
@@ -113,16 +116,19 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
                 mean = mean - guidance_scale * w_t * var * grad.detach()
 
             if t > 1:
-                z = torch.randn_like(x)
-                if L_d is not None:
-                    z = z @ L_d.T
+                z = _color(torch.randn_like(x))
                 x = mean + var.sqrt() * z
             else:
                 x = mean   # no noise at last step
 
         batches.append(x.cpu())
 
-    return scaler.inverse_transform(torch.cat(batches).numpy()), var_history, grad_history
+    out = torch.cat(batches).numpy()                                        # (N, F, T)
+    N, Fdim, Tlen = out.shape
+    flat = out.transpose(0, 2, 1).reshape(N * Tlen, Fdim)                   # (N*T, F)
+    flat = scaler.inverse_transform(flat)
+    out  = flat.reshape(N, Tlen, Fdim).transpose(0, 2, 1)                   # (N, F, T)
+    return out, var_history, grad_history
 
 
 def generate_rejection(model, scaler, cfg, *, cond_fn, num_samples=None,
@@ -146,7 +152,12 @@ def generate_rejection(model, scaler, cfg, *, cond_fn, num_samples=None,
             break
 
         batch_np, _, _ = generate(model, scaler, cfg, num_samples=batch_size, L=L)
-        batch_t  = torch.tensor(scaler.transform(batch_np), dtype=torch.float32)
+        # batch_np: (N, F, T); standardize per (factor) on flattened time
+        N, F_, T_ = batch_np.shape
+        flat      = batch_np.transpose(0, 2, 1).reshape(N * T_, F_)
+        flat_norm = scaler.transform(flat)
+        batch_t   = torch.tensor(flat_norm.reshape(N, T_, F_).transpose(0, 2, 1),
+                                 dtype=torch.float32)
 
         n_tried += len(batch_t)
         for i in range(len(batch_t)):

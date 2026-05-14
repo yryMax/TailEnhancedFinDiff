@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from factor_diffusion_train import FactorDenoiser
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
+import yaml
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -192,17 +193,13 @@ if __name__ == "__main__":
                         help="checkpoint filename (without .pt); defaults to ckpt['cfg']['ckpt_name']")
     args = parser.parse_args()
 
+    with open(f"model/{args.exp_name}/cfg.yaml") as f:
+        cfg = yaml.safe_load(f)
+
     prefix = f"model/{args.exp_name}"
-    ckpt_name = args.ckpt
-    if ckpt_name is None:
-        # peek the only ckpt or fall back to the directory listing
-        ckpts = [f for f in os.listdir(f"{prefix}/checkpoints") if f.endswith(".pt")]
-        assert len(ckpts) == 1, f"specify --ckpt; found {ckpts}"
-        ckpt_name = ckpts[0][:-3]
-    ckpt_path = f"{prefix}/checkpoints/{ckpt_name}.pt"
+    ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
 
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-    cfg    = ckpt["cfg"]
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     scaler = ckpt["scaler"]

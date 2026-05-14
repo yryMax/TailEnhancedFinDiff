@@ -209,9 +209,20 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     loss, _   = losses_mc.median(dim=0)
     return loss.mean()
 
+def plot_loss(epochs, losses):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(range(1, epochs + 1), losses)
+    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
+    ax.set_title("Training Loss")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname("assets/factor_loss.png") or ".", exist_ok=True)
+    fig.savefig("assets/factor_loss.png", dpi=150)
+    plt.close(fig)
+
 
 def train(model, loader, optimizer, scaler, cfg, ckpt_path,
-          L=None, loss_plot_path="assets/factor_loss.png"):
+          L=None, loss_plot_path=""):
     """
     Train DLPM denoiser.
 
@@ -222,6 +233,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     :param cfg: dict with epochs, num_timesteps, levy_alpha, mc_outer, mc_inner
     :param ckpt_path: full path to write checkpoint
     :param L: optional Cholesky factor for L-noise
+    :param resume: if True and ckpt_path exists, restore model/optim/sched/epoch and continue
     """
 
     epochs        = cfg["epochs"]
@@ -237,8 +249,47 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
 
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     losses   = []
+    start_epoch = 0
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
 
-    for epoch in range(1, epochs + 1):
+    if os.path.exists(ckpt_path):
+        ck = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+
+        if ck.get("model_kwargs") and ck["model_kwargs"] != model.kwargs:
+            raise ValueError(
+                f"model_kwargs mismatch — ckpt {ck['model_kwargs']} vs current {model.kwargs}"
+            )
+        # cfg fields that change loss/noise semantics; must match to safely resume
+        for k in ("levy_alpha", "num_timesteps", "seq_len", "mc_outer", "mc_inner"):
+            if ck.get("cfg", {}).get(k) != cfg.get(k):
+                raise ValueError(
+                    f"cfg mismatch on '{k}': ckpt={ck['cfg'].get(k)} vs cfg={cfg.get(k)}"
+                )
+
+        model.load_state_dict(ck["model_state"])
+        optimizer.load_state_dict(ck["optimizer_state"])
+        lr_sched.load_state_dict(ck["lr_sched_state"])
+        start_epoch = ck.get("epoch", 0)
+        losses      = list(ck.get("losses", []))
+        if start_epoch >= epochs:
+            print(f"ckpt already at epoch {start_epoch} >= target {epochs}; nothing to do")
+            return
+        print(f"resuming from epoch {start_epoch + 1}/{epochs} (ckpt: {ckpt_path})")
+
+    def _save_ckpt(epoch):
+        torch.save({
+            "model_state":     model.state_dict(),
+            "model_kwargs":    model.kwargs,
+            "optimizer_state": optimizer.state_dict(),
+            "lr_sched_state":  lr_sched.state_dict(),
+            "epoch":           epoch,
+            "losses":          losses,
+            "scaler":          scaler,
+            "cfg":             cfg,
+            "L_noise":         L.detach().cpu() if L is not None else None,
+        }, ckpt_path)
+
+    for epoch in range(start_epoch + 1, epochs + 1):
         model.train()
         epoch_loss = 0.0
         for (x,) in loader:
@@ -259,24 +310,12 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
         losses.append(epoch_loss / len(loader.dataset))
         print(f"Epoch [{epoch:4d}/{epochs}]  loss={losses[-1]:.6f}")
 
-    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-    torch.save({
-        "model_state":   model.state_dict(),
-        "model_kwargs":  model.kwargs,
-        "scaler":        scaler,
-        "cfg":           cfg,
-        "L_noise":       L.detach().cpu() if L is not None else None,
-    }, ckpt_path)
+        if epoch % 20 == 0:
+            _save_ckpt(epoch)
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(range(1, epochs + 1), losses)
-    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
-    ax.set_title("Training Loss")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(loss_plot_path) or ".", exist_ok=True)
-    fig.savefig(loss_plot_path, dpi=150)
-    plt.close(fig)
+    _save_ckpt(epochs)
+
+    plot_loss(epochs, losses)
 
 
 if __name__ == "__main__":

@@ -39,107 +39,131 @@ def load_data(csv_path, factor_names, seq_len):
     return np.ascontiguousarray(windows), scaler
 
 
-class AdaLayerNorm(nn.Module):
-    """LayerNorm with affine params predicted from a conditioning vector (zero-init = identity)."""
-    def __init__(self, dim, cond_dim):
+class DropPath(nn.Module):
+    """Per-sample stochastic depth (residual drop)."""
+    def __init__(self, drop_prob=0.0):
         super().__init__()
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
-        self.proj = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, dim * 2))
-        nn.init.zeros_(self.proj[-1].weight)
-        nn.init.zeros_(self.proj[-1].bias)
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = torch.empty(shape, dtype=x.dtype, device=x.device).bernoulli_(keep)
+        return x * mask / keep
+
+
+def _modulate(x, shift, scale):
+    # x: (B, L, dim), shift/scale: (B, dim)
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+class DiTBlock(nn.Module):
+    """
+    DiT-style block with AdaLN-Zero gating (Peebles & Xie 2023) and SwiGLU FFN.
+    Three residual branches: joint (F*T) self-attention, factor-axis self-attention
+    (per-timestep cross-factor coupling — restores the factorized inductive bias),
+    and SwiGLU FFN. One linear from cond → nine modulations (shift/scale/gate × 3).
+    """
+    def __init__(self, dim, n_heads, cond_dim, num_factors, seq_len,
+                 mlp_ratio=4, drop_path=0.0):
+        super().__init__()
+        self.num_factors = num_factors
+        self.seq_len     = seq_len
+        # Joint (F*T) self-attention
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False)
+        self.attn  = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        # Factor-axis self-attention (per timestep)
+        self.norm_f = nn.LayerNorm(dim, elementwise_affine=False)
+        self.fattn  = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        # SwiGLU FFN
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False)
+        hidden = int(dim * mlp_ratio)
+        self.w1 = nn.Linear(dim, hidden)
+        self.w2 = nn.Linear(dim, hidden)
+        self.w3 = nn.Linear(hidden, dim)
+        # AdaLN-Zero: 9 modulations per block
+        self.ada = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, 9 * dim))
+        nn.init.zeros_(self.ada[-1].weight)
+        nn.init.zeros_(self.ada[-1].bias)
+        self.drop_path = DropPath(drop_path)
 
     def forward(self, x, cond):
-        gb = self.proj(cond)
-        while gb.dim() < x.dim():
-            gb = gb.unsqueeze(1)
-        g, b = gb.chunk(2, dim=-1)
-        return self.norm(x) * (1 + g) + b
+        # x: (B, F*T, dim), cond: (B, cond_dim)
+        B, L, C = x.shape
+        F_, T = self.num_factors, self.seq_len
+        s1, sc1, g1, sf, scf, gf, s2, sc2, g2 = self.ada(cond).chunk(9, dim=-1)
 
+        # Branch 1: joint (F*T) attention
+        h = _modulate(self.norm1(x), s1, sc1)
+        h, _ = self.attn(h, h, h, need_weights=False)
+        x = x + self.drop_path(g1.unsqueeze(1) * h)
 
-class DilatedTemporalConv(nn.Module):
-    """Dilated 1D conv along time, per (batch, factor). Multi-scale RF + residual."""
-    def __init__(self, dim, dilations=(1, 2, 4)):
-        super().__init__()
-        layers = []
-        for d in dilations:
-            layers += [nn.Conv1d(dim, dim, kernel_size=3, padding=d, dilation=d), nn.GELU()]
-        self.net = nn.Sequential(*layers[:-1])
-        self.res = nn.Conv1d(dim, dim, kernel_size=1)
+        # Branch 2: factor-axis attention (B, F*T, C) → (B*T, F, C) → attend → reshape back
+        h = _modulate(self.norm_f(x), sf, scf)
+        h = h.reshape(B, F_, T, C).transpose(1, 2).reshape(B * T, F_, C)
+        h, _ = self.fattn(h, h, h, need_weights=False)
+        h = h.reshape(B, T, F_, C).transpose(1, 2).reshape(B, F_ * T, C)
+        x = x + self.drop_path(gf.unsqueeze(1) * h)
 
-    def forward(self, x):                                # x: (B*F, dim, T)
-        return self.net(x) + self.res(x)
-
-
-class FactorBlock(nn.Module):
-    """
-    One factorized block:
-      Pathway A — temporal conv along T (per factor)
-      Pathway B — cross-factor self-attention along F (per timestep)
-    Both pathways operate on the same input in parallel, are summed onto the residual,
-    then passed through AdaLN → FFN → AdaLN with timestep conditioning.
-    """
-    def __init__(self, dim, cond_dim, n_heads, dilations=(1, 2, 4)):
-        super().__init__()
-        self.t_conv = DilatedTemporalConv(dim, dilations)
-        self.f_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=n_heads, batch_first=True)
-        self.adanorm1 = AdaLayerNorm(dim, cond_dim)
-        self.adanorm2 = AdaLayerNorm(dim, cond_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 2), nn.GELU(), nn.Linear(dim * 2, dim)
-        )
-
-    def forward(self, x, cond):
-        """
-        :param x:    (B, F, T, dim)
-        :param cond: (B, cond_dim)
-        """
-        B, F, T, C = x.shape
-
-        # Pathway A: temporal conv (per factor)
-        x_t   = x.reshape(B * F, T, C).transpose(1, 2)                       # (B*F, dim, T)
-        out_t = self.t_conv(x_t).transpose(1, 2).reshape(B, F, T, C)
-
-        # Pathway B: cross-factor attention (per timestep)
-        x_f   = x.transpose(1, 2).reshape(B * T, F, C)                       # (B*T, F, dim)
-        out_f, _ = self.f_attn(x_f, x_f, x_f, need_weights=False)
-        out_f = out_f.reshape(B, T, F, C).transpose(1, 2)                    # (B, F, T, dim)
-
-        mixed = self.adanorm1(x + out_t + out_f, cond)
-        return self.adanorm2(mixed + self.ffn(mixed), cond)
+        # Branch 3: SwiGLU FFN
+        h = _modulate(self.norm2(x), s2, sc2)
+        h = self.w3(nn.functional.silu(self.w1(h)) * self.w2(h))
+        x = x + self.drop_path(g2.unsqueeze(1) * h)
+        return x
 
 
 class FactorDenoiser(nn.Module):
     """
-    Factorized denoiser for factor-return time series.
-    Predicts noise eps_t given noisy input x_t (B, F, T) and timestep t.
+    DiT-style denoiser for factor-return time series.
 
-    Stacks `num_blocks` FactorBlocks; each block runs temporal conv and cross-factor
-    attention in parallel and fuses them via AdaLN-conditioned residual + FFN.
+    Flattens the (F, T) grid into F*T tokens and runs full self-attention with
+    AdaLN-Zero timestep conditioning over `num_blocks` transformer blocks.
+    Per-factor output projection lets each factor learn its own readout scale.
 
-    :param num_factors: number of factor channels F
-    :param seq_len:     temporal length T
-    :param dim:         token embedding dimension
-    :param n_heads:     attention heads
-    :param cond_dim:    timestep embedding dimension
-    :param num_blocks:  number of FactorBlocks
-    :param dilations:   dilation rates for the temporal conv pathway
+    :param num_factors:   number of factor channels F
+    :param seq_len:       temporal length T
+    :param dim:           token embedding dimension
+    :param n_heads:       attention heads
+    :param cond_dim:      timestep embedding dimension
+    :param num_blocks:    transformer depth
+    :param mlp_ratio:     SwiGLU hidden = dim * mlp_ratio
+    :param drop_path_max: stochastic depth schedule peak (0 → drop_path_max over depth)
     """
-    def __init__(self, num_factors, seq_len, dim=128, n_heads=8, cond_dim=128,
-                 num_blocks=6, dilations=(1, 2, 4)):
+    def __init__(self, num_factors, seq_len, dim=384, n_heads=8, cond_dim=384,
+                 num_blocks=12, mlp_ratio=4, drop_path_max=0.1):
         super().__init__()
-        self.kwargs = dict(num_factors=num_factors, seq_len=seq_len, dim=dim,
-                           n_heads=n_heads, cond_dim=cond_dim, num_blocks=num_blocks,
-                           dilations=list(dilations))
+        self.kwargs = dict(
+            num_factors=num_factors, seq_len=seq_len, dim=dim, n_heads=n_heads,
+            cond_dim=cond_dim, num_blocks=num_blocks, mlp_ratio=mlp_ratio,
+            drop_path_max=drop_path_max,
+        )
+        self.num_factors = num_factors
+        self.seq_len     = seq_len
+
+        # Timestep embedding
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
+
+        # Token embedding + 2D positional encoding for (factor, time)
         self.in_proj        = nn.Linear(1, dim)
         self.feature_embed  = nn.Parameter(torch.randn(1, num_factors, 1, dim) * 0.02)
         self.temporal_embed = nn.Parameter(torch.randn(1, 1, seq_len, dim) * 0.02)
+
+        # Transformer trunk with linear stochastic-depth schedule
+        dpr = torch.linspace(0, drop_path_max, num_blocks).tolist()
         self.blocks = nn.ModuleList([
-            FactorBlock(dim, cond_dim, n_heads, dilations) for _ in range(num_blocks)
+            DiTBlock(dim, n_heads, cond_dim, num_factors, seq_len, mlp_ratio, dpr[i])
+            for i in range(num_blocks)
         ])
-        self.final_norm = AdaLayerNorm(dim, cond_dim)
-        self.out_proj   = nn.Linear(dim, 1)
+
+        # Final AdaLN + per-factor output projection (zero-init → eps_pred starts at 0)
+        self.final_norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.final_ada  = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, 2 * dim))
+        nn.init.zeros_(self.final_ada[-1].weight)
+        nn.init.zeros_(self.final_ada[-1].bias)
+        self.out_proj = nn.Parameter(torch.zeros(num_factors, dim, 1))
 
     def forward(self, x, t):
         """
@@ -147,16 +171,21 @@ class FactorDenoiser(nn.Module):
         :param t: timestep indices, shape (B,)
         :return: predicted noise, shape (B, F, T)
         """
+        B, Fc, T = x.shape
         cond = self.t_embed(self.t_sin(t))                                   # (B, cond_dim)
 
         h = self.in_proj(x.unsqueeze(-1))                                    # (B, F, T, dim)
         h = h + self.feature_embed + self.temporal_embed
+        h = h.reshape(B, Fc * T, -1)                                         # (B, F*T, dim)
 
-        for block in self.blocks:
-            h = block(h, cond)
+        for blk in self.blocks:
+            h = blk(h, cond)
 
-        h = self.final_norm(h, cond)
-        return self.out_proj(h).squeeze(-1)                                  # (B, F, T)
+        shift, scale = self.final_ada(cond).chunk(2, dim=-1)
+        h = _modulate(self.final_norm(h), shift, scale)                      # (B, F*T, dim)
+        h = h.reshape(B, Fc, T, -1)
+        eps = torch.einsum('bftd,fdo->bfto', h, self.out_proj).squeeze(-1)
+        return eps                                                           # (B, F, T)
 
 def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     """

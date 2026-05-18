@@ -331,7 +331,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+     #       nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += loss.item() * x.size(0)
 

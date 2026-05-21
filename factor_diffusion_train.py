@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from diffusers.models.attention import BasicTransformerBlock
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from sklearn.preprocessing import StandardScaler
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
@@ -27,14 +26,55 @@ def load_data(csv_path, factor_names):
     return X_norm, scaler
 
 
+class DiTBlock(nn.Module):
+    """
+    DiT block with per-token AdaLN-Zero conditioning.
+
+        h <- h + a1 * MHSA( (1+g1) * LN(h) + b1 )
+        h <- h + a2 * FFN ( (1+g2) * LN(h) + b2 )
+
+    Zero-init makes every block an identity at start (gate a=0), so training begins
+    from a stable pass-through and learns the modulation gradually. The LayerNorms
+    carry no affine params — scale/shift come entirely from the condition.
+    """
+    def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.attn  = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        hidden = int(dim * mlp_ratio)
+        self.ffn = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.ada = nn.Linear(cond_dim, 6 * dim)        # c_i -> (g1,b1,a1,g2,b2,a2)
+        nn.init.zeros_(self.ada.weight)
+        nn.init.zeros_(self.ada.bias)
+
+    def forward(self, h, c):
+        """:param h: (B, F, dim) tokens; :param c: (B, F, cond_dim) per-token condition."""
+        g1, b1, a1, g2, b2, a2 = self.ada(c).chunk(6, dim=-1)   # each (B, F, dim)
+        x = self.norm1(h) * (1 + g1) + b1
+        attn_out, _ = self.attn(x, x, x, need_weights=False)
+        h = h + a1 * attn_out
+        x = self.norm2(h) * (1 + g2) + b2
+        h = h + a2 * self.ffn(x)
+        return h
+
+
 class FactorDenoiser(nn.Module):
     """
-    Each factor is treated as a token; timestep is injected via AdaLN conditioning.
+    DiT denoiser for next-day factor returns. Each factor is a token; the previous
+    day's factor vector (Markov-1 condition) and the diffusion timestep are injected
+    via per-token AdaLN-Zero (factorDiff-style), not added to the token inputs.
+
+    Per-token condition: c_i = cond_mlp(c_prev) + feature_cond_embed[i] + e_t, where
+    cond_mlp maps the full previous cross-section so each factor's dynamics can depend
+    on the whole previous regime (cross-factor spillover), and feature_cond_embed gives
+    each factor a distinct modulation while sharing that context.
+
     :param num_factors: number of factor tokens (D)
     :param dim: token embedding dimension
     :param n_heads: number of attention heads
-    :param cond_dim: timestep embedding dimension
-    :param num_blocks: number of transformer blocks
+    :param cond_dim: condition / timestep embedding dimension
+    :param num_blocks: number of DiT blocks
     """
     def __init__(self, num_factors, dim=128, n_heads=8, cond_dim=128, num_blocks=6):
         super().__init__()
@@ -42,18 +82,17 @@ class FactorDenoiser(nn.Module):
                            cond_dim=cond_dim, num_blocks=num_blocks)
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
-        self.in_proj = nn.Linear(1, dim)                                        # scalar → token
-        self.cond_proj = nn.Linear(1, dim)                                      # prev-day scalar → token
-        self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # learnable factor id
-        self.blocks = nn.ModuleList([
-            BasicTransformerBlock(
-                dim=dim, num_attention_heads=n_heads, attention_head_dim=dim // n_heads,
-                norm_type="ada_norm_continuous",
-                ada_norm_continous_conditioning_embedding_dim=cond_dim,
-            )
-            for _ in range(num_blocks)
-        ])
-        self.out_proj = nn.Linear(dim, 1)                                       # token → scalar
+        self.in_proj = nn.Linear(1, dim)                                            # scalar → token
+        self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # input token identity
+        self.cond_mlp = nn.Sequential(                                             # prev cross-section → context
+            nn.Linear(num_factors, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+        self.feature_cond_embed = nn.Parameter(torch.randn(1, num_factors, cond_dim) * 0.02)  # per-factor cond id
+        self.blocks = nn.ModuleList([DiTBlock(dim, n_heads, cond_dim) for _ in range(num_blocks)])
+        self.norm_out = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.ada_out  = nn.Linear(cond_dim, 2 * dim)                                # final AdaLN-Zero
+        nn.init.zeros_(self.ada_out.weight)
+        nn.init.zeros_(self.ada_out.bias)
+        self.out_proj = nn.Linear(dim, 1)                                          # token → scalar
 
     def forward(self, x, t, c):
         """
@@ -62,13 +101,15 @@ class FactorDenoiser(nn.Module):
         :param c: clean condition factor returns (day t), shape (B, F)
         :return: predicted noise, shape (B, F)
         """
-        cond = self.t_embed(self.t_sin(t))          # (B, cond_dim)
-        h = self.in_proj(x.unsqueeze(-1))            # (B, F, dim)
-        h = h + self.feature_embed                   # add factor identity
-        h = h + self.cond_proj(c.unsqueeze(-1))      # add previous-day condition per token
+        e_t  = self.t_embed(self.t_sin(t))                            # (B, cond_dim)
+        ctx  = self.cond_mlp(c)                                       # (B, cond_dim) full prev cross-section
+        cond = ctx[:, None, :] + self.feature_cond_embed + e_t[:, None, :]   # (B, F, cond_dim) per-token
+        h = self.in_proj(x.unsqueeze(-1)) + self.feature_embed       # (B, F, dim)
         for blk in self.blocks:
-            h = blk(h, added_cond_kwargs={"pooled_text_emb": cond})
-        return self.out_proj(h).squeeze(-1)          # (B, F)
+            h = blk(h, cond)
+        g, b = self.ada_out(cond).chunk(2, dim=-1)
+        h = self.norm_out(h) * (1 + g) + b
+        return self.out_proj(h).squeeze(-1)                          # (B, F)
 
 def dlpm_loss(model, x, c, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     """

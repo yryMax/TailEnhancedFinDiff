@@ -29,9 +29,6 @@ def load_data(csv_path, factor_names):
 
 class FactorDenoiser(nn.Module):
     """
-    Transformer-based denoiser for factor return vectors.
-    Predicts the noise eps_t given noisy input x_t and timestep t.
-
     Each factor is treated as a token; timestep is injected via AdaLN conditioning.
     :param num_factors: number of factor tokens (D)
     :param dim: token embedding dimension
@@ -46,6 +43,7 @@ class FactorDenoiser(nn.Module):
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
         self.in_proj = nn.Linear(1, dim)                                        # scalar → token
+        self.cond_proj = nn.Linear(1, dim)                                      # prev-day scalar → token
         self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # learnable factor id
         self.blocks = nn.ModuleList([
             BasicTransformerBlock(
@@ -57,20 +55,22 @@ class FactorDenoiser(nn.Module):
         ])
         self.out_proj = nn.Linear(dim, 1)                                       # token → scalar
 
-    def forward(self, x, t):
+    def forward(self, x, t, c):
         """
-        :param x: noisy factor returns, shape (B, F)
+        :param x: noisy target factor returns (day t+1), shape (B, F)
         :param t: timestep indices, shape (B,)
+        :param c: clean condition factor returns (day t), shape (B, F)
         :return: predicted noise, shape (B, F)
         """
         cond = self.t_embed(self.t_sin(t))          # (B, cond_dim)
         h = self.in_proj(x.unsqueeze(-1))            # (B, F, dim)
         h = h + self.feature_embed                   # add factor identity
+        h = h + self.cond_proj(c.unsqueeze(-1))      # add previous-day condition per token
         for blk in self.blocks:
             h = blk(h, added_cond_kwargs={"pooled_text_emb": cond})
         return self.out_proj(h).squeeze(-1)          # (B, F)
 
-def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
+def dlpm_loss(model, x, c, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     """
     Compute DLPM epsilon-prediction loss via median-of-means MC estimator.
     When mc_outer=1 and mc_inner=1, degenerates to a single-sample MSE.
@@ -92,10 +92,11 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
         a     = sample_skewed_levy(alpha, (B, D), device)
         eps_t = _eps(a)
         x_t   = bg * x + bs * eps_t
-        return (model(x_t, t) - eps_t).pow(2).mean(dim=-1).mean()
+        return (model(x_t, t, c) - eps_t).pow(2).mean(dim=-1).mean()
 
     N     = mc_outer * mc_inner
     x_mc  = x.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
+    c_mc  = c.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
     t_mc  = t.repeat(N)
     bg_mc = bg.repeat(N, 1)
     bs_mc = bs.repeat(N, 1)
@@ -108,7 +109,7 @@ def dlpm_loss(model, x, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
     eps_t_mc = _eps(a_mc)
     x_t_mc   = bg_mc * x_mc + bs_mc * eps_t_mc
 
-    losses_mc = (model(x_t_mc, t_mc) - eps_t_mc).pow(2).mean(dim=-1)
+    losses_mc = (model(x_t_mc, t_mc, c_mc) - eps_t_mc).pow(2).mean(dim=-1)
     losses_mc = losses_mc.view(mc_outer, mc_inner, B).mean(dim=1)   # mean over inner
     loss, _   = losses_mc.median(dim=0)                              # median over outer
     return loss.mean()
@@ -120,7 +121,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     Train DLPM denoiser.
 
     :param model: FactorDenoiser
-    :param loader: DataLoader yielding (x,) batches
+    :param loader: DataLoader yielding (c, x) batches — c=day-t condition, x=day-(t+1) target
     :param optimizer: torch optimizer
     :param scaler: fitted StandardScaler (saved into ckpt)
     :param cfg: dict with epochs, num_timesteps, levy_alpha, mc_outer, mc_inner
@@ -145,13 +146,14 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
-        for (x,) in loader:
+        for (c, x) in loader:
+            c   = c.to(DEVICE)
             x   = x.to(DEVICE)
             t   = torch.randint(1, num_timesteps, (x.size(0),), device=DEVICE)
             bg  = bargammas_d[t].unsqueeze(-1)
             bs  = barsigmas_d[t].unsqueeze(-1)
 
-            loss = dlpm_loss(model, x, t, bg, bs, levy_alpha, mc_outer, mc_inner, DEVICE, L=L_d)
+            loss = dlpm_loss(model, x, c, t, bg, bs, levy_alpha, mc_outer, mc_inner, DEVICE, L=L_d)
 
             optimizer.zero_grad()
             loss.backward()
@@ -203,7 +205,9 @@ if __name__ == "__main__":
         print(f"use_L_noise=True, L shape={tuple(L.shape)}, "
               f"max|C-LL^T|={np.abs(C - (L.numpy() @ L.numpy().T)).max():.2e}")
 
-    loader    = DataLoader(TensorDataset(torch.tensor(X)), batch_size=cfg["batch_size"], shuffle=True)
+    cond_np   = torch.tensor(X[:-1])
+    target_np = torch.tensor(X[1:])
+    loader    = DataLoader(TensorDataset(cond_np, target_np), batch_size=cfg["batch_size"], shuffle=True)
     model     = FactorDenoiser(num_factors=len(cfg["factors"])).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
 

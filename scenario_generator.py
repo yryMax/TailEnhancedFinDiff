@@ -123,19 +123,37 @@ class DiffusionSampler(FactorSampler):
         self.cfg = ckpt["cfg"]
 
     def generate(self, num_generate: int) -> np.ndarray:
-        from factor_diffusion_sample import generate
-        samples, _, _ = generate(self.model, self.scaler, self.cfg,
-                                 num_samples=num_generate, L=self.L)
-        return samples
+        raise NotImplementedError(
+            "DiffusionSampler is a Markov-1 conditional model; there is no unconditional "
+            "generation. Use generate_step(cond, ...) or generate_path(seed, horizon, num_paths)."
+        )
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
+        raise NotImplementedError(
+            "DiffusionSampler is conditional; pass a day-t condition to generate_step / "
+            "generate_path (energy guidance via their cond_fn argument)."
+        )
+
+    def generate_step(self, cond: np.ndarray, num_repeat: int = 1,
+                      cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+        """Sample day t+1 given day-t condition rows `cond` (original space)."""
         from factor_diffusion_sample import generate
         samples, _, _ = generate(
-            self.model, self.scaler, self.cfg, num_samples=num_generate,
+            self.model, self.scaler, self.cfg, cond, num_repeat=num_repeat,
             cond_fn=cond_fn, guidance_scale=self.guidance_scale,
             guidance_decay_pow=self.guidance_decay_pow, L=self.L,
         )
         return samples
+
+    def generate_path(self, seed_cond: np.ndarray, horizon: int, num_paths: int,
+                      cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+        """Autoregressive rollout from `seed_cond`. Returns (num_paths, horizon, F)."""
+        from factor_diffusion_sample import generate_path
+        return generate_path(
+            self.model, self.scaler, self.cfg, seed_cond, horizon, num_paths,
+            cond_fn=cond_fn, guidance_scale=self.guidance_scale,
+            guidance_decay_pow=self.guidance_decay_pow, L=self.L,
+        )
 
 class ScenarioGenerator:
     def __init__(self, model: FactorModel, sampler: FactorSampler):

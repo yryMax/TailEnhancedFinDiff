@@ -131,7 +131,7 @@ def generate(model, scaler, cfg, cond, num_repeat=1, cond_fn=None,
     return scaler.inverse_transform(x.cpu().numpy()), vh, gh
 
 
-def generate_path(model, scaler, cfg, seed_cond, horizon, num_paths,
+def     generate_path(model, scaler, cfg, seed_cond, horizon, num_paths,
                   cond_fn=None, guidance_scale=5.0, guidance_decay_pow=1.0, L=None):
     """
     Autoregressive rollout. Start from a real day-t factor vector, sample the next
@@ -215,23 +215,19 @@ def generate_rejection(model, scaler, cfg, cond, *, cond_fn, num_samples=None,
 
 
 if __name__ == "__main__":
+    import yaml
     parser = argparse.ArgumentParser()
     parser.add_argument("exp_name", help="experiment name; loads model/<exp_name>/checkpoints/*.pt")
-    parser.add_argument("--ckpt", default=None,
-                        help="checkpoint filename (without .pt); defaults to ckpt['cfg']['ckpt_name']")
+
     args = parser.parse_args()
 
     prefix = f"model/{args.exp_name}"
-    ckpt_name = args.ckpt
-    if ckpt_name is None:
-        # peek the only ckpt or fall back to the directory listing
-        ckpts = [f for f in os.listdir(f"{prefix}/checkpoints") if f.endswith(".pt")]
-        assert len(ckpts) == 1, f"specify --ckpt; found {ckpts}"
-        ckpt_name = ckpts[0][:-3]
-    ckpt_path = f"{prefix}/checkpoints/{ckpt_name}.pt"
+    with open(f"model/{args.exp_name}/cfg.yaml") as f:
+        cfg = yaml.safe_load(f)
+
+    ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
 
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-    cfg    = ckpt["cfg"]
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["model_state"])
     scaler = ckpt["scaler"]
@@ -240,7 +236,7 @@ if __name__ == "__main__":
     # Autoregressive rollout from the last observed day as the seed condition.
     factors_df = pd.read_csv(f"{prefix}/factors.csv", index_col=0)[cfg["factors"]].dropna()
     seed       = factors_df.values[-1].astype(np.float32)
-    horizon    = cfg.get("horizon", 22)
+    horizon    = cfg.get("seq_len")
     num_paths  = cfg["num_generate"]
 
     paths = generate_path(model, scaler, cfg, seed, horizon, num_paths, L=L)

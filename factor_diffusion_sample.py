@@ -2,7 +2,7 @@ import argparse
 import os
 import numpy as np
 import torch
-from factor_diffusion_train import FactorDenoiser
+from factor_diffusion_train import FactorDenoiser, pick_state
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -250,17 +250,15 @@ if __name__ == "__main__":
 
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(pick_state(ckpt, use_ema=True))
     scaler = ckpt["scaler"]
 
-    # Self-starting autoregressive rollout: day 0 is drawn from the learned null token
-    # (marginal p(F_0)), so no observed seed day is required.
-    horizon    = cfg.get("seq_len")
+    horizon    = 1
     num_paths  = cfg["num_generate"]
 
     paths = generate_path(model, scaler, cfg, horizon, num_paths)
 
     out_path = f"{prefix}/samples/path_{cfg['ckpt_name']}_{num_paths}x{horizon}.npy"
     os.makedirs(f"{prefix}/samples", exist_ok=True)
-    np.save(out_path, paths)
+    np.save(out_path, paths.transpose(0, 2, 1))
     print(f"Saved {paths.shape} paths (num_paths, horizon, F) → {out_path}")

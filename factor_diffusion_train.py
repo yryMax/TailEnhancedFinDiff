@@ -26,6 +26,19 @@ def load_data(csv_path, factor_names):
     return X_norm, scaler
 
 
+def pick_state(ckpt, use_ema=True):
+    """
+    Choose which weights to load from a checkpoint. Prefers the EMA (smoothed)
+    weights when present and requested; falls back to the online `model_state`
+    for older checkpoints that predate EMA. Sampling should use the EMA weights.
+    """
+    if use_ema:
+        ema = ckpt.get("ema_state")
+        if ema is not None:
+            return ema
+    return ckpt["model_state"]
+
+
 class DiTBlock(nn.Module):
     """
     DiT block with per-token AdaLN-Zero conditioning.
@@ -157,6 +170,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     num_timesteps  = cfg["num_timesteps"]
     levy_alpha     = cfg["levy_alpha"]
     cond_drop_prob = cfg.get("cond_drop_prob", 0.1)   # CFG-style null-token dropout for self-starting
+    ema_decay      = cfg.get("ema_decay", 0.999)      # weight EMA for sampling; <=0 disables
 
     _, bargammas, _, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
     bargammas_d = bargammas.to(DEVICE)
@@ -164,6 +178,12 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
 
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     losses   = []
+
+    # EMA of the weights: a smoothed copy of theta updated after every step. Sampling
+    # uses these (the online weights keep jittering around the optimum under the noisy
+    # diffusion loss; averaging the parameter trajectory gives a steadier model).
+    use_ema = ema_decay and ema_decay > 0.0
+    ema = {k: v.detach().clone() for k, v in model.state_dict().items()} if use_ema else None
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -184,6 +204,15 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
             optimizer.step()
             epoch_loss += loss.item() * x.size(0)
 
+            if use_ema:
+                with torch.no_grad():
+                    msd = model.state_dict()
+                    for k, v in ema.items():
+                        if v.dtype.is_floating_point:
+                            v.mul_(ema_decay).add_(msd[k].detach(), alpha=1.0 - ema_decay)
+                        else:
+                            v.copy_(msd[k])     # ints/buffers: just track
+
         lr_sched.step()
         losses.append(epoch_loss / len(loader.dataset))
         print(f"Epoch [{epoch:4d}/{epochs}]  loss={losses[-1]:.6f}")
@@ -191,6 +220,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     torch.save({
         "model_state":   model.state_dict(),
+        "ema_state":     ema,                  # None when EMA disabled
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
         "cfg":           cfg,
@@ -217,8 +247,6 @@ if __name__ == "__main__":
 
     data_file = cfg.get("data_file")
     X, scaler = load_data(f"{prefix}/{data_file}", cfg["factors"])
-    print(f"data file: {data_file}")
-    print(f"experiment id: {args.exp_name}")
 
     cond_np   = torch.tensor(X[:-1])
     target_np = torch.tensor(X[1:])

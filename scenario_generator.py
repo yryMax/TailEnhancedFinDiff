@@ -117,21 +117,21 @@ class DiffusionSampler(FactorSampler):
         self.model = FactorDenoiser(**ckpt["model_kwargs"]).to(self.device)
         self.model.load_state_dict(ckpt["model_state"])
         self.scaler = ckpt["scaler"]
-        self.L = ckpt.get("L_noise")
         self.guidance_scale = guidance_scale
         self.guidance_decay_pow = guidance_decay_pow
         self.cfg = ckpt["cfg"]
 
     def generate(self, num_generate: int) -> np.ndarray:
-        raise NotImplementedError(
-            "DiffusionSampler is a Markov-1 conditional model; there is no unconditional "
-            "generation. Use generate_step(cond, ...) or generate_path(seed, horizon, num_paths)."
-        )
+        """Unconditional draw of the marginal p(F_0) from the learned null token.
+        Requires a checkpoint trained with cond_drop_prob > 0."""
+        from factor_diffusion_sample import generate_uncond
+        return generate_uncond(self.model, self.scaler, self.cfg, num_generate)
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         raise NotImplementedError(
-            "DiffusionSampler is conditional; pass a day-t condition to generate_step / "
-            "generate_path (energy guidance via their cond_fn argument)."
+            "Unconditional generate() uses the null token and takes no energy. For "
+            "constrained sampling pass a day-t condition + cond_fn to generate_step / "
+            "generate_path (energy guidance), or use generate_rejection."
         )
 
     def generate_step(self, cond: np.ndarray, num_repeat: int = 1,
@@ -141,18 +141,19 @@ class DiffusionSampler(FactorSampler):
         samples, _, _ = generate(
             self.model, self.scaler, self.cfg, cond, num_repeat=num_repeat,
             cond_fn=cond_fn, guidance_scale=self.guidance_scale,
-            guidance_decay_pow=self.guidance_decay_pow, L=self.L,
+            guidance_decay_pow=self.guidance_decay_pow,
         )
         return samples
 
-    def generate_path(self, seed_cond: np.ndarray, horizon: int, num_paths: int,
+    def generate_path(self, horizon: int, num_paths: int, seed_cond: np.ndarray = None,
                       cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
-        """Autoregressive rollout from `seed_cond`. Returns (num_paths, horizon, F)."""
+        """Autoregressive rollout. seed_cond=None self-starts day 0 from the null token;
+        pass seed_cond to anchor on a real day. Returns (num_paths, horizon, F)."""
         from factor_diffusion_sample import generate_path
         return generate_path(
-            self.model, self.scaler, self.cfg, seed_cond, horizon, num_paths,
+            self.model, self.scaler, self.cfg, horizon, num_paths, seed_cond=seed_cond,
             cond_fn=cond_fn, guidance_scale=self.guidance_scale,
-            guidance_decay_pow=self.guidance_decay_pow, L=self.L,
+            guidance_decay_pow=self.guidance_decay_pow,
         )
 
 class ScenarioGenerator:

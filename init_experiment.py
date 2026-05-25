@@ -22,11 +22,9 @@ DEFAULT_CFG = {
     "lr":            1.0e-4,
     "num_timesteps": 100,
     "levy_alpha":    2.0,
-    "mc_outer":      1,
-    "mc_inner":      1,
     "ckpt_name":     "DDPM_vanilla",
     "num_generate":  4096,
-    "use_L_noise":   False,
+    "cond_drop_prob": 0.1,
 }
 
 SUBDIRS = ["checkpoints", "samples", "test"]

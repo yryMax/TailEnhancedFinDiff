@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from sklearn.preprocessing import StandardScaler
-from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy, sample_sas
+from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -86,6 +86,7 @@ class FactorDenoiser(nn.Module):
         self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # input token identity
         self.cond_mlp = nn.Sequential(                                             # prev cross-section → context
             nn.Linear(num_factors, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+        self.null_cond = nn.Parameter(torch.zeros(1, cond_dim))                     # learned "no condition" token (BOS)
         self.feature_cond_embed = nn.Parameter(torch.randn(1, num_factors, cond_dim) * 0.02)  # per-factor cond id
         self.blocks = nn.ModuleList([DiTBlock(dim, n_heads, cond_dim) for _ in range(num_blocks)])
         self.norm_out = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -94,15 +95,24 @@ class FactorDenoiser(nn.Module):
         nn.init.zeros_(self.ada_out.bias)
         self.out_proj = nn.Linear(dim, 1)                                          # token → scalar
 
-    def forward(self, x, t, c):
+    def forward(self, x, t, c=None, cond_drop_mask=None):
         """
         :param x: noisy target factor returns (day t+1), shape (B, F)
         :param t: timestep indices, shape (B,)
-        :param c: clean condition factor returns (day t), shape (B, F)
+        :param c: clean condition factor returns (day t), shape (B, F); None → fully
+                  unconditional (every sample uses the learned null token), which makes
+                  the model sample the marginal p(F_0) for self-starting rollouts.
+        :param cond_drop_mask: optional bool (B,); True rows use the null token instead
+                  of cond_mlp(c). Used for condition dropout during training (CFG-style).
         :return: predicted noise, shape (B, F)
         """
         e_t  = self.t_embed(self.t_sin(t))                            # (B, cond_dim)
-        ctx  = self.cond_mlp(c)                                       # (B, cond_dim) full prev cross-section
+        if c is None:
+            ctx = self.null_cond.expand(x.shape[0], -1)              # (B, cond_dim) all-null
+        else:
+            ctx = self.cond_mlp(c)                                    # (B, cond_dim) full prev cross-section
+            if cond_drop_mask is not None:
+                ctx = torch.where(cond_drop_mask[:, None], self.null_cond, ctx)
         cond = ctx[:, None, :] + self.feature_cond_embed + e_t[:, None, :]   # (B, F, cond_dim) per-token
         h = self.in_proj(x.unsqueeze(-1)) + self.feature_embed       # (B, F, dim)
         for blk in self.blocks:
@@ -111,53 +121,27 @@ class FactorDenoiser(nn.Module):
         h = self.norm_out(h) * (1 + g) + b
         return self.out_proj(h).squeeze(-1)                          # (B, F)
 
-def dlpm_loss(model, x, c, t, bg, bs, alpha, mc_outer, mc_inner, device, L=None):
+def dlpm_loss(model, x, c, t, bg, bs, alpha, device, cond_drop_prob=0.0):
     """
-    Compute DLPM epsilon-prediction loss via median-of-means MC estimator.
-    When mc_outer=1 and mc_inner=1, degenerates to a single-sample MSE.
+    DLPM epsilon-prediction loss (single-sample MSE).
 
     Forward: x_t = bg * x_0 + bs * eps,  eps = sqrt(a) * z  with a_i per-factor i.i.d.
-    When L (Cholesky of data corr) is provided, the Gaussian component is L-colored:
-        eps = sqrt(a) * (z @ L.T),  so  Cov(eps | a) = diag(sqrt a) C diag(sqrt a).
-    A is still sampled independently per factor (DLPM style).
+
+    Condition dropout (CFG-style): each sample's condition is replaced by the learned
+    null token with probability `cond_drop_prob`. This teaches the model the marginal
+    p(F_0) (no previous day) alongside the transition p(F_{t+1}|F_t), so sampling can
+    self-start a path without an external seed.
     """
-    B, D = x.shape
-
-    def _eps(a):
-        z = torch.randn_like(a)
-        if L is not None:
-            z = z @ L.T
-        return a.sqrt() * z
-
-    if mc_outer == 1 and mc_inner == 1:
-        a     = sample_skewed_levy(alpha, (B, D), device)
-        eps_t = _eps(a)
-        x_t   = bg * x + bs * eps_t
-        return (model(x_t, t, c) - eps_t).pow(2).mean(dim=-1).mean()
-
-    N     = mc_outer * mc_inner
-    x_mc  = x.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
-    c_mc  = c.unsqueeze(0).expand(N, -1, -1).reshape(N * B, D)
-    t_mc  = t.repeat(N)
-    bg_mc = bg.repeat(N, 1)
-    bs_mc = bs.repeat(N, 1)
-
-    a_outer = sample_skewed_levy(alpha, (mc_outer * B, D), device)
-    a_mc    = (a_outer.view(mc_outer, 1, B, D)
-                      .expand(-1, mc_inner, -1, -1)
-                      .reshape(N * B, D))
-
-    eps_t_mc = _eps(a_mc)
-    x_t_mc   = bg_mc * x_mc + bs_mc * eps_t_mc
-
-    losses_mc = (model(x_t_mc, t_mc, c_mc) - eps_t_mc).pow(2).mean(dim=-1)
-    losses_mc = losses_mc.view(mc_outer, mc_inner, B).mean(dim=1)   # mean over inner
-    loss, _   = losses_mc.median(dim=0)                              # median over outer
-    return loss.mean()
+    B, D  = x.shape
+    drop  = torch.rand(B, device=device) < cond_drop_prob   # (B,) True → use null token
+    a     = sample_skewed_levy(alpha, (B, D), device)
+    eps_t = a.sqrt() * torch.randn_like(a)
+    x_t   = bg * x + bs * eps_t
+    return (model(x_t, t, c, cond_drop_mask=drop) - eps_t).pow(2).mean()
 
 
 def train(model, loader, optimizer, scaler, cfg, ckpt_path,
-          L=None, loss_plot_path="assets/factor_loss.png"):
+          loss_plot_path="assets/factor_loss.png"):
     """
     Train DLPM denoiser.
 
@@ -165,21 +149,18 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     :param loader: DataLoader yielding (c, x) batches — c=day-t condition, x=day-(t+1) target
     :param optimizer: torch optimizer
     :param scaler: fitted StandardScaler (saved into ckpt)
-    :param cfg: dict with epochs, num_timesteps, levy_alpha, mc_outer, mc_inner
+    :param cfg: dict with epochs, num_timesteps, levy_alpha
     :param ckpt_path: full path to write checkpoint
-    :param L: optional Cholesky factor for L-noise
     """
 
-    epochs        = cfg["epochs"]
-    num_timesteps = cfg["num_timesteps"]
-    levy_alpha    = cfg["levy_alpha"]
-    mc_outer      = cfg["mc_outer"]
-    mc_inner      = cfg["mc_inner"]
+    epochs         = cfg["epochs"]
+    num_timesteps  = cfg["num_timesteps"]
+    levy_alpha     = cfg["levy_alpha"]
+    cond_drop_prob = cfg.get("cond_drop_prob", 0.1)   # CFG-style null-token dropout for self-starting
 
     _, bargammas, _, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
     bargammas_d = bargammas.to(DEVICE)
     barsigmas_d = barsigmas.to(DEVICE)
-    L_d         = L.to(DEVICE) if L is not None else None
 
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     losses   = []
@@ -194,7 +175,8 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
             bg  = bargammas_d[t].unsqueeze(-1)
             bs  = barsigmas_d[t].unsqueeze(-1)
 
-            loss = dlpm_loss(model, x, c, t, bg, bs, levy_alpha, mc_outer, mc_inner, DEVICE, L=L_d)
+            loss = dlpm_loss(model, x, c, t, bg, bs, levy_alpha, DEVICE,
+                             cond_drop_prob=cond_drop_prob)
 
             optimizer.zero_grad()
             loss.backward()
@@ -212,7 +194,6 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
         "cfg":           cfg,
-        "L_noise":       L.detach().cpu() if L is not None else None,
     }, ckpt_path)
 
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -239,13 +220,6 @@ if __name__ == "__main__":
     print(f"data file: {data_file}")
     print(f"experiment id: {args.exp_name}")
 
-    L = None
-    if cfg.get("use_L_noise", False):
-        C = np.corrcoef(X, rowvar=False).astype(np.float32)
-        L = torch.from_numpy(np.linalg.cholesky(C))
-        print(f"use_L_noise=True, L shape={tuple(L.shape)}, "
-              f"max|C-LL^T|={np.abs(C - (L.numpy() @ L.numpy().T)).max():.2e}")
-
     cond_np   = torch.tensor(X[:-1])
     target_np = torch.tensor(X[1:])
     loader    = DataLoader(TensorDataset(cond_np, target_np), batch_size=cfg["batch_size"], shuffle=True)
@@ -253,4 +227,4 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
 
     ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
-    train(model, loader, optimizer, scaler, cfg, ckpt_path, L=L)
+    train(model, loader, optimizer, scaler, cfg, ckpt_path)

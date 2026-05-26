@@ -161,13 +161,12 @@ class DiffusionSampler(FactorSampler):
     """
 
     def __init__(self, checkpoint_path: str, device: str = None,
-                 guidance_scale: float = 1.0, guidance_decay_pow: float = 1.0,
-                 use_ema: bool = True):
+                 guidance_scale: float = 1.0, guidance_decay_pow: float = 1.0):
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.model = FactorDenoiser(**ckpt["model_kwargs"]).to(self.device)
-        self.model.load_state_dict(pick_state(ckpt, use_ema=use_ema))
+        self.model.load_state_dict(pick_state(ckpt))
         self.model.eval()
         self.scaler = ckpt["scaler"]
         self.guidance_scale = guidance_scale

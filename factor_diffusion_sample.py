@@ -250,10 +250,10 @@ if __name__ == "__main__":
 
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
-    model.load_state_dict(pick_state(ckpt, use_ema=True))
+    model.load_state_dict(pick_state(ckpt))
     scaler = ckpt["scaler"]
 
-    horizon    = 1
+    horizon    = cfg["seq_len"]
     num_paths  = cfg["num_generate"]
 
     paths = generate_path(model, scaler, cfg, horizon, num_paths)

@@ -14,7 +14,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_cfg(exp_name: str) -> dict:
-    """Load model/<exp_name>/cfg.yaml. Pure function — no side effects."""
     with open(f"model/{exp_name}/cfg.yaml") as f:
         return yaml.safe_load(f)
 
@@ -26,29 +25,18 @@ def load_data(csv_path, factor_names):
     return X_norm, scaler
 
 
-def pick_state(ckpt, use_ema=True):
-    """
-    Choose which weights to load from a checkpoint. Prefers the EMA (smoothed)
-    weights when present and requested; falls back to the online `model_state`
-    for older checkpoints that predate EMA. Sampling should use the EMA weights.
-    """
-    if use_ema:
-        ema = ckpt.get("ema_state")
-        if ema is not None:
-            return ema
-    return ckpt["model_state"]
+def pick_state(ckpt):
+    """Weights to load for sampling: the EMA (smoothed) weights."""
+    return ckpt["ema_state"]
 
 
 class DiTBlock(nn.Module):
     """
     DiT block with per-token AdaLN-Zero conditioning.
-
         h <- h + a1 * MHSA( (1+g1) * LN(h) + b1 )
         h <- h + a2 * FFN ( (1+g2) * LN(h) + b2 )
-
     Zero-init makes every block an identity at start (gate a=0), so training begins
-    from a stable pass-through and learns the modulation gradually. The LayerNorms
-    carry no affine params — scale/shift come entirely from the condition.
+    from a stable pass-through and learns the modulation gradually.
     """
     def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4.0):
         super().__init__()
@@ -62,10 +50,14 @@ class DiTBlock(nn.Module):
         nn.init.zeros_(self.ada.bias)
 
     def forward(self, h, c):
-        """:param h: (B, F, dim) tokens; :param c: (B, F, cond_dim) per-token condition."""
-        g1, b1, a1, g2, b2, a2 = self.ada(c).chunk(6, dim=-1)   # each (B, F, dim)
+        """
+        :param h: (B, F, dim) tokens
+        :param c: (B, F, cond_dim) per-token condition.
+        """
+        # ada: nn.Linear cond_dim -> 6 * dim, ada(c): (B,F,6*dim), each chunk: (B,F,dim)
+        g1, b1, a1, g2, b2, a2 = self.ada(c).chunk(6, dim=-1)
         x = self.norm1(h) * (1 + g1) + b1
-        attn_out, _ = self.attn(x, x, x, need_weights=False)
+        attn_out, _ = self.attn(x, x, x, need_weights=False) # self attention
         h = h + a1 * attn_out
         x = self.norm2(h) * (1 + g2) + b2
         h = h + a2 * self.ffn(x)
@@ -74,15 +66,9 @@ class DiTBlock(nn.Module):
 
 class FactorDenoiser(nn.Module):
     """
-    DiT denoiser for next-day factor returns. Each factor is a token; the previous
-    day's factor vector (Markov-1 condition) and the diffusion timestep are injected
-    via per-token AdaLN-Zero (factorDiff-style), not added to the token inputs.
-
     Per-token condition: c_i = cond_mlp(c_prev) + feature_cond_embed[i] + e_t, where
     cond_mlp maps the full previous cross-section so each factor's dynamics can depend
-    on the whole previous regime (cross-factor spillover), and feature_cond_embed gives
-    each factor a distinct modulation while sharing that context.
-
+    on the whole previous regime (cross-factor spillover)
     :param num_factors: number of factor tokens (D)
     :param dim: token embedding dimension
     :param n_heads: number of attention heads
@@ -95,7 +81,7 @@ class FactorDenoiser(nn.Module):
                            cond_dim=cond_dim, num_blocks=num_blocks)
         self.t_sin   = Timesteps(cond_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self.t_embed = TimestepEmbedding(in_channels=cond_dim, time_embed_dim=cond_dim)
-        self.in_proj = nn.Linear(1, dim)                                            # scalar → token
+        self.in_proj = nn.Linear(1, dim)                                            # factor -> factor embedding
         self.feature_embed = nn.Parameter(torch.randn(1, num_factors, dim) * 0.02)  # input token identity
         self.cond_mlp = nn.Sequential(                                             # prev cross-section → context
             nn.Linear(num_factors, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
@@ -113,10 +99,9 @@ class FactorDenoiser(nn.Module):
         :param x: noisy target factor returns (day t+1), shape (B, F)
         :param t: timestep indices, shape (B,)
         :param c: clean condition factor returns (day t), shape (B, F); None → fully
-                  unconditional (every sample uses the learned null token), which makes
-                  the model sample the marginal p(F_0) for self-starting rollouts.
+                  unconditional (every sample uses the learned null token).
         :param cond_drop_mask: optional bool (B,); True rows use the null token instead
-                  of cond_mlp(c). Used for condition dropout during training (CFG-style).
+                  of cond_mlp(c). Used for condition dropout during training
         :return: predicted noise, shape (B, F)
         """
         e_t  = self.t_embed(self.t_sin(t))                            # (B, cond_dim)
@@ -153,6 +138,18 @@ def dlpm_loss(model, x, c, t, bg, bs, alpha, device, cond_drop_prob=0.0):
     return (model(x_t, t, c, cond_drop_mask=drop) - eps_t).pow(2).mean()
 
 
+def plot_loss(losses, loss_plot_path):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(range(1, len(losses) + 1), losses)
+    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
+    ax.set_title("Training Loss")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(loss_plot_path) or ".", exist_ok=True)
+    fig.savefig(loss_plot_path, dpi=150)
+    plt.close(fig)
+
+
 def train(model, loader, optimizer, scaler, cfg, ckpt_path,
           loss_plot_path="assets/factor_loss.png"):
     """
@@ -169,8 +166,8 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     epochs         = cfg["epochs"]
     num_timesteps  = cfg["num_timesteps"]
     levy_alpha     = cfg["levy_alpha"]
-    cond_drop_prob = cfg.get("cond_drop_prob", 0.1)   # CFG-style null-token dropout for self-starting
-    ema_decay      = cfg.get("ema_decay", 0.999)      # weight EMA for sampling; <=0 disables
+    cond_drop_prob = cfg.get("cond_drop_prob", 0.1)
+    ema_decay      = cfg.get("ema_decay", 0.999)
 
     _, bargammas, _, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
     bargammas_d = bargammas.to(DEVICE)
@@ -179,9 +176,6 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     losses   = []
 
-    # EMA of the weights: a smoothed copy of theta updated after every step. Sampling
-    # uses these (the online weights keep jittering around the optimum under the noisy
-    # diffusion loss; averaging the parameter trajectory gives a steadier model).
     use_ema = ema_decay and ema_decay > 0.0
     ema = {k: v.detach().clone() for k, v in model.state_dict().items()} if use_ema else None
 
@@ -226,28 +220,17 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
         "cfg":           cfg,
     }, ckpt_path)
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(range(1, epochs + 1), losses)
-    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE Loss")
-    ax.set_title("Training Loss")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(loss_plot_path) or ".", exist_ok=True)
-    fig.savefig(loss_plot_path, dpi=150)
-    plt.close(fig)
+    plot_loss(losses, loss_plot_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("exp_name", help="experiment name; reads model/<exp_name>/cfg.yaml")
     args = parser.parse_args()
-
     cfg    = load_cfg(args.exp_name)
     prefix = f"model/{args.exp_name}"
-
     data_file = cfg.get("data_file")
     X, scaler = load_data(f"{prefix}/{data_file}", cfg["factors"])
-
     cond_np   = torch.tensor(X[:-1])
     target_np = torch.tensor(X[1:])
     loader    = DataLoader(TensorDataset(cond_np, target_np), batch_size=cfg["batch_size"], shuffle=True)

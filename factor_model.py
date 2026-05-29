@@ -218,28 +218,32 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
                        residuals=residuals, factor_type=factor_type, data_source=path)
 
 
-def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
+def reconstruct_returns(model: FactorModel, fs: np.ndarray,
+                        return_components: bool = False):
     """
     Reconstruct stock returns from factor samples via R = F @ beta + idiosyncratic noise.
     Idiosyncratic noise is drawn from a scaled Student-t fitted to model residuals.
     :param model: fitted FactorModel
     :param fs:    (N, K) factor samples — column order must match model.F
-    :return:      (N, S) reconstructed stock returns
+    :param return_components: if True, return (R, systematic, idiosyncratic).
+    :return:      (N, S) reconstructed stock returns, or tuple of three (N, S) arrays.
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta
 
-    res_df = np.asarray(model.res_df)
-    noise = np.empty((N, S))
-    for s in range(S):
-        df_s = float(res_df[s])
-        if np.isfinite(df_s):
-            noise[:, s] = np.random.standard_t(df_s, size=N) * np.sqrt((df_s - 2) / df_s)
-        else:
-            noise[:, s] = np.random.randn(N)
+    # Vectorized scaled Student-t via t = z / sqrt(chi2/df). For non-finite df,
+    # use a large df (effectively standard normal).
+    res_df  = np.asarray(model.res_df, dtype=np.float64)
+    df_use  = np.where(np.isfinite(res_df), res_df, 1e6)           # (S,)
+    z       = np.random.standard_normal((N, S))
+    chi2    = np.random.chisquare(df_use, size=(N, S))
+    noise   = z / np.sqrt(chi2 / df_use) * np.sqrt((df_use - 2) / df_use)
 
     idiosyncratic = noise * model.res_std
-    return systematic + idiosyncratic
+    total = systematic + idiosyncratic
+    if return_components:
+        return total, systematic, idiosyncratic
+    return total
 
 
 def save_model(model: FactorModel, prefix: str) -> None:

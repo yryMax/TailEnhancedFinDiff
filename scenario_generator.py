@@ -234,20 +234,20 @@ class ScenarioGenerator:
     def cond_factor_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         return self.sampler.cond_generate(num_generate, cond_fn)
 
-    def stock_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+    def stock_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                       return_components: bool = False):
         if cond_fn is not None:
             fs = self.cond_factor_generate(num_generate, cond_fn)
         else:
             fs = self.factor_generate(num_generate)
 
         fs_full = np.column_stack([np.ones((len(fs), 1)), fs])
-            
-        returns = reconstruct_returns(self.model, fs_full)
-        return returns
+        return reconstruct_returns(self.model, fs_full, return_components=return_components)
 
     def stock_generate_temporal(self, num_generate: int, seq_len: int,
                                  cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
-                                 fs_cache: str = None) -> np.ndarray:
+                                 fs_cache: str = None,
+                                 return_components: bool = False):
         """
         Generate temporal stock returns by sampling factor paths then mapping through
         the factor model with fresh idiosyncratic noise per (path, day).
@@ -255,7 +255,8 @@ class ScenarioGenerator:
         :param fs_cache: optional .npy path for factor paths. If the file exists,
                          load it instead of regenerating (must match shape (N, F, T)).
                          If missing, generate and save there.
-        :return: (num_generate, S, seq_len) stock returns
+        :param return_components: if True, return (R, systematic, idiosyncratic) each (N, S, T).
+        :return: (num_generate, S, seq_len) stock returns; or 3-tuple of same shape.
         """
         import os
         if fs_cache is not None and os.path.isfile(fs_cache):
@@ -273,6 +274,13 @@ class ScenarioGenerator:
         fs_full = np.concatenate([alpha, fs], axis=1)                    # (N, F+1, T)
         fs_flat = fs_full.transpose(0, 2, 1).reshape(N * T, F + 1)       # (N*T, F+1)
 
-        returns_flat = reconstruct_returns(self.model, fs_flat)          # (N*T, S)
-        S = returns_flat.shape[1]
-        return returns_flat.reshape(N, T, S).transpose(0, 2, 1)          # (N, S, T)
+        out = reconstruct_returns(self.model, fs_flat, return_components=return_components)
+
+        def _back(flat):
+            S = flat.shape[1]
+            return flat.reshape(N, T, S).transpose(0, 2, 1)              # (N, S, T)
+
+        if return_components:
+            R_flat, sys_flat, idio_flat = out
+            return _back(R_flat), _back(sys_flat), _back(idio_flat)
+        return _back(out)

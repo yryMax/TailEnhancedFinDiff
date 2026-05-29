@@ -2,6 +2,7 @@ import argparse
 import os
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 from factor_diffusion_train import FactorDenoiser
 from factor_diffusion_levy import levy_noise_schedule
 
@@ -142,7 +143,7 @@ def generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=None,
         cur = torch.tensor(scaler.transform(seed), dtype=torch.float32, device=DEVICE)
         n_cond_steps = horizon
 
-    for _ in range(n_cond_steps):
+    for _ in tqdm(range(n_cond_steps), desc=f"rollout (horizon={horizon})", leave=False):
         cur, _, _ = _reverse(model, cfg, cur, num_paths, cond_fn=cond_fn,
                              guidance_scale=guidance_scale,
                              guidance_decay_pow=guidance_decay_pow)

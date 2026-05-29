@@ -16,8 +16,8 @@ class FactorSampler(ABC):
         pass
 
     @abstractmethod
-    def sample_temporal(self, num_generate: int, seq_len: int) -> np.ndarray:
-        # (N,F)
+    def sample_temporal(self, num_generate: int, seq_len: int,
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
         pass
 
     @abstractmethod
@@ -42,10 +42,17 @@ class ResampleSampler(FactorSampler):
         idx = self.rng.choice(len(self.factors), size=num_generate, replace=True)
         return self.factors[idx]
 
-    def sample_temporal(self, num_generate: int, seq_len: int) -> np.ndarray:
+    def sample_temporal(self, num_generate: int, seq_len: int,
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
         """
         stationary boostrap
         """
+        if cond_fn is not None:
+            raise NotImplementedError(
+                "ResampleSampler.sample_temporal: per-day conditioning is not "
+                "supported for stationary bootstrap (non-parametric, no clean "
+                "rejection mechanism). Use DiffusionSampler or GaussianSampler.")
+
         N, F = self.factors.shape
         idx  = self.rng.integers(0, N, size=num_generate)
         out  = np.empty((num_generate, seq_len, F), dtype=self.factors.dtype)
@@ -106,18 +113,34 @@ class GaussianSampler(FactorSampler):
     def sample_crossectional(self, num_generate: int) -> np.ndarray:
         return self.rng.multivariate_normal(mean=self.mean, cov=self.cov, size=num_generate)
 
-    def sample_temporal(self, num_generate: int, seq_len: int) -> np.ndarray:
-        F = self._F.shape[1]
+    def sample_temporal(self, num_generate: int, seq_len: int,
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+        """
+        Per-path EWMA Gaussian rollout. When `cond_fn` is given, each day's
+        draw is soft-rejected (accept prob exp(-self.guidance_scale * energy)).
+        """
+        F   = self._F.shape[1]
         lam = self.ewma_lambda
-        mu = self.mean
-        Sigma_init = self.cov
-
+        mu  = self.mean
         out = np.empty((num_generate, seq_len, F), dtype=np.float64)
 
+        sc_mean  = self.scaler.mean_
+        sc_scale = self.scaler.scale_
+        max_retries = 200
+
         for n in range(num_generate):
-            Sigma = Sigma_init.copy()
+            Sigma = self.cov.copy()
             for t in range(seq_len):
-                f_t = self.rng.multivariate_normal(mean=mu, cov=Sigma)
+                f_t = self.rng.multivariate_normal(mu, Sigma)
+
+                if cond_fn is not None:
+                    for _ in range(max_retries):
+                        f_norm = ((f_t - sc_mean) / sc_scale).astype(np.float32)
+                        energy = float(cond_fn(torch.from_numpy(f_norm[None])))
+                        if self.rng.random() < np.exp(-self.guidance_scale * energy):
+                            break
+                        f_t = self.rng.multivariate_normal(mu, Sigma)
+
                 out[n, t, :] = f_t
                 d = f_t - mu
                 Sigma = lam * Sigma + (1 - lam) * np.outer(d, d)
@@ -176,10 +199,15 @@ class DiffusionSampler(FactorSampler):
         """Unconditional cross-section: draw the marginal p(F_0) from the null token."""
         return generate_uncond(self.model, self.scaler, self.cfg, num_generate)   # (N, F)
 
-    def sample_temporal(self, num_generate: int, seq_len: int) -> np.ndarray:
-        """Self-starting autoregressive rollout, returned as (N, F, seq_len)."""
+    def sample_temporal(self, num_generate: int, seq_len: int,
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+        """Self-starting autoregressive rollout, returned as (N, F, seq_len).
+        cond_fn is applied per-day via gradient guidance through generate_path.
+        """
         paths = generate_path(self.model, self.scaler, self.cfg,
-                              horizon=seq_len, num_paths=num_generate)             # (N, seq_len, F)
+                              horizon=seq_len, num_paths=num_generate,
+                              cond_fn=cond_fn, guidance_scale=self.guidance_scale,
+                              guidance_decay_pow=self.guidance_decay_pow)         # (N, seq_len, F)
         return paths.transpose(0, 2, 1)                                           # (N, F, seq_len)
 
     def cond_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
@@ -199,8 +227,9 @@ class ScenarioGenerator:
     def factor_generate(self, num_generate: int) -> np.ndarray:
         return self.sampler.sample_crossectional(num_generate)
 
-    def factor_generate_temporal(self, num_generate: int, seq_len) -> np.ndarray:
-        return self.sampler.sample_temporal(num_generate, seq_len)
+    def factor_generate_temporal(self, num_generate: int, seq_len: int,
+                                  cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+        return self.sampler.sample_temporal(num_generate, seq_len, cond_fn=cond_fn)
 
     def cond_factor_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         return self.sampler.cond_generate(num_generate, cond_fn)
@@ -215,3 +244,35 @@ class ScenarioGenerator:
             
         returns = reconstruct_returns(self.model, fs_full)
         return returns
+
+    def stock_generate_temporal(self, num_generate: int, seq_len: int,
+                                 cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                                 fs_cache: str = None) -> np.ndarray:
+        """
+        Generate temporal stock returns by sampling factor paths then mapping through
+        the factor model with fresh idiosyncratic noise per (path, day).
+
+        :param fs_cache: optional .npy path for factor paths. If the file exists,
+                         load it instead of regenerating (must match shape (N, F, T)).
+                         If missing, generate and save there.
+        :return: (num_generate, S, seq_len) stock returns
+        """
+        import os
+        if fs_cache is not None and os.path.isfile(fs_cache):
+            fs = np.load(fs_cache)
+            assert fs.shape[0] == num_generate and fs.shape[2] == seq_len, \
+                f"cached fs shape {fs.shape} != (num_generate={num_generate}, F, seq_len={seq_len})"
+        else:
+            fs = self.factor_generate_temporal(num_generate, seq_len, cond_fn=cond_fn)  # (N, F, T)
+            if fs_cache is not None:
+                os.makedirs(os.path.dirname(fs_cache) or ".", exist_ok=True)
+                np.save(fs_cache, fs)
+
+        N, F, T = fs.shape
+        alpha   = np.ones((N, 1, T), dtype=fs.dtype)
+        fs_full = np.concatenate([alpha, fs], axis=1)                    # (N, F+1, T)
+        fs_flat = fs_full.transpose(0, 2, 1).reshape(N * T, F + 1)       # (N*T, F+1)
+
+        returns_flat = reconstruct_returns(self.model, fs_flat)          # (N*T, S)
+        S = returns_flat.shape[1]
+        return returns_flat.reshape(N, T, S).transpose(0, 2, 1)          # (N, S, T)

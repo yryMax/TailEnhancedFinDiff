@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 from factor_diffusion_sample import generate_uncond, generate_path, _reverse
-from factor_diffusion_train import FactorDenoiser, pick_state
+from factor_diffusion_train import FactorDenoiser
 from factor_model import FactorModel, reconstruct_returns
 from collections.abc import Callable
 
@@ -30,7 +30,6 @@ class ResampleSampler(FactorSampler):
         """
         :param seq_len: required for sample_temporal; path length per draw.
         :param p:       stationary-bootstrap block restart probability
-                        (expected block length = 1/p; default 0.125 → 8 days).
         """
         self.factors = train_factors.drop(columns=["alpha"]).values if "alpha" in train_factors.columns else train_factors.values
         self.scaler = scaler
@@ -166,7 +165,7 @@ class DiffusionSampler(FactorSampler):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.model = FactorDenoiser(**ckpt["model_kwargs"]).to(self.device)
-        self.model.load_state_dict(pick_state(ckpt))
+        self.model.load_state_dict(ckpt["ema_state"])
         self.model.eval()
         self.scaler = ckpt["scaler"]
         self.guidance_scale = guidance_scale

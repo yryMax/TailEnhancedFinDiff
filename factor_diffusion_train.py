@@ -25,11 +25,6 @@ def load_data(csv_path, factor_names):
     return X_norm, scaler
 
 
-def pick_state(ckpt):
-    """Weights to load for sampling: the EMA (smoothed) weights."""
-    return ckpt["ema_state"]
-
-
 class DiTBlock(nn.Module):
     """
     DiT block with per-token AdaLN-Zero conditioning.
@@ -176,8 +171,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     losses   = []
 
-    use_ema = ema_decay and ema_decay > 0.0
-    ema = {k: v.detach().clone() for k, v in model.state_dict().items()} if use_ema else None
+    ema = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -198,14 +192,13 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
             optimizer.step()
             epoch_loss += loss.item() * x.size(0)
 
-            if use_ema:
-                with torch.no_grad():
-                    msd = model.state_dict()
-                    for k, v in ema.items():
-                        if v.dtype.is_floating_point:
-                            v.mul_(ema_decay).add_(msd[k].detach(), alpha=1.0 - ema_decay)
-                        else:
-                            v.copy_(msd[k])     # ints/buffers: just track
+            with torch.no_grad():
+                msd = model.state_dict()
+                for k, v in ema.items():
+                    if v.dtype.is_floating_point:
+                        v.mul_(ema_decay).add_(msd[k].detach(), alpha=1.0 - ema_decay)
+                    else:
+                        v.copy_(msd[k])
 
         lr_sched.step()
         losses.append(epoch_loss / len(loader.dataset))
@@ -214,7 +207,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
     torch.save({
         "model_state":   model.state_dict(),
-        "ema_state":     ema,                  # None when EMA disabled
+        "ema_state":     ema,
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
         "cfg":           cfg,

@@ -2,78 +2,60 @@ import argparse
 import os
 import numpy as np
 import torch
-from factor_diffusion_train import FactorDenoiser, pick_state
-from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy
+from factor_diffusion_train import FactorDenoiser
+from factor_diffusion_levy import levy_noise_schedule
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
-def _reverse(model, cfg, cond, n=None, factor_dim=None, cond_fn=None, guidance_scale=5.0,
-             guidance_decay_pow=1.0, collect_history=False):
+def _reverse(model, cfg, cond, n, cond_fn=None, guidance_scale=5.0,
+             guidance_decay_pow=1.0):
     """
-    For the batch:
-    1. Pre-sample A_{1:T} ~ S(alpha/2, beta=1)
-    2. Compute Sigma_t chain:
-           Sigma_0 = sigma_0^2 * A_0
-           Sigma_t = sigma_t^2 * A_t + gamma_t^2 * Sigma_{t-1}
-    3. Start from x_T ~ N(0, Sigma_T) (consistent with the pre-sampled A chain).
-    4. Reverse denoising T-1 → 1, with the clean condition `cond` fed at every step:
+    1. x_T ~ N(0, barsigmas[T-1]^2 I)
+    2. For t = T-1 ... 1, with clean condition `cond` fed at every step:
            eps_pred = model(x_t, t, cond)
-           Gamma_t  = 1 - gamma_t^2 * Sigma_{t-1} / Sigma_t
+           Gamma_t  = 1 - gammas[t]^2 * barsigmas[t-1]^2 / barsigmas[t]^2
            mean     = (x_t - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
-           variance = Gamma_t * Sigma_{t-1}
-           x_{t-1}  = mean + sqrt(variance) * N(0,I)
+           var      = Gamma_t * barsigmas[t-1]^2
+           x_{t-1}  = mean + sqrt(var) * N(0,I)
 
     :param cond: (n, F) clean condition tensor on DEVICE, normalized space. None →
-                 unconditional draw from the learned null token (samples the marginal
-                 p(F_0)); then `n` and `factor_dim` must be given for the output shape.
+                 unconditional draw from the learned null token
     :param cond_fn: optional cond_fn(x0_hat) -> per-sample energy; enables gradient guidance
     :param guidance_scale: guidance strength `s`; mean -= s * w_t * var * grad
     :param guidance_decay_pow: exponent p in w_t = (SNR_t / (SNR_t + 1))**p (Karras/EDM SNR weight)
     :return: (x, var_history, grad_history); x is (n, F) normalized tensor on DEVICE
     """
-    levy_alpha    = cfg["levy_alpha"]
     num_timesteps = cfg["num_timesteps"]
-    if cond is not None:
-        n, factor_dim = cond.shape
-    else:
-        assert n is not None and factor_dim is not None, \
-            "unconditional _reverse (cond=None) requires explicit n and factor_dim"
 
-    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
+    gammas, bargammas, _, barsigmas = levy_noise_schedule(cfg['levy_alpha'], num_timesteps)
     T = len(gammas)
     gammas    = gammas.to(DEVICE)
     bargammas = bargammas.to(DEVICE)
-    sigmas    = sigmas.to(DEVICE)
     barsigmas = barsigmas.to(DEVICE)
 
-    A = [sample_skewed_levy(levy_alpha, (n, factor_dim), DEVICE) for _ in range(T)]
-    Sigmas = [sigmas[0] ** 2 * A[0]]
-    for t in range(1, T):
-        Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
+    Sigma2    = barsigmas ** 2
+    factor_dim = len(cfg["factors"])
+    x = barsigmas[-1] * torch.randn(n, factor_dim, device=DEVICE)
 
-    x = Sigmas[-1].sqrt() * torch.randn(n, factor_dim, device=DEVICE)
+
+    if cond is not None:
+        assert cond.shape == (n, factor_dim)
 
     var_history, grad_history = [], []
     for t in range(T - 1, 0, -1):
         t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
         eps_pred = model(x, t_b, cond)
 
-        Sigma_t  = Sigmas[t]
-        Sigma_t1 = Sigmas[t - 1]
-
-        # posterior contraction factor
-        Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
+        # posterior contraction factor: Gamma_t = beta_t / (1 - bar_alpha_t)
+        Gamma_t = 1 - (gammas[t] ** 2 * Sigma2[t - 1]) / (Sigma2[t] + 1e-8)
 
         # posterior mean
         mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
 
-        # posterior variance (Gaussian, conditioned on A)
-        var = (Gamma_t * Sigma_t1).clamp(min=0.0)
-
-        if collect_history:
-            var_history.append((t, float(var.mean()), float(var.max())))
+        # posterior variance (scalar, deterministic)
+        var = (Gamma_t * Sigma2[t - 1]).clamp(min=0.0)
 
         # DLPM-correct guidance: shift posterior mean by -s * w_t * var * ∂loss/∂x_t.
         # eps recomputed under enable_grad so ∂eps/∂x_t (dense Jacobian carrying
@@ -88,8 +70,6 @@ def _reverse(model, cfg, cond, n=None, factor_dim=None, cond_fn=None, guidance_s
                 x0_hat     = (x_g - barsigmas[t] * eps_pred_g) / bargammas[t]
                 loss       = cond_fn(x0_hat).sum()
                 grad       = torch.autograd.grad(loss, x_g)[0]
-            if collect_history:
-                grad_history.append((t, float(grad.mean()), float(grad.max()), float(w_t)))
             mean = mean - guidance_scale * w_t * var * grad.detach()
 
         if t > 1:
@@ -119,8 +99,7 @@ def generate(model, scaler, cfg, cond, num_repeat=1, cond_fn=None,
 
     x, vh, gh = _reverse(model, cfg, cond_norm, cond_fn=cond_fn,
                          guidance_scale=guidance_scale,
-                         guidance_decay_pow=guidance_decay_pow,
-                         collect_history=True)
+                         guidance_decay_pow=guidance_decay_pow)
     return scaler.inverse_transform(x.cpu().numpy()), vh, gh
 
 
@@ -132,22 +111,13 @@ def generate_uncond(model, scaler, cfg, num_samples):
     :return: (num_samples, F) array in ORIGINAL space.
     """
     model.eval()
-    factor_dim = len(cfg["factors"])
-    x, _, _ = _reverse(model, cfg, None, n=num_samples, factor_dim=factor_dim)
+    x, _, _ = _reverse(model, cfg, None, num_samples)
     return scaler.inverse_transform(x.cpu().numpy())
 
 
 def generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=None,
                   cond_fn=None, guidance_scale=5.0, guidance_decay_pow=1.0):
     """
-    Autoregressive rollout. The first day is drawn unconditionally from the learned
-    null token (marginal p(F_0)); each subsequent day is sampled conditioned on the
-    previous one and fed back, for `horizon` total days.
-
-    Pass `seed_cond` to instead anchor day 0 on a real factor vector (the old
-    behaviour). With seed_cond, all `horizon` days are conditional rollout steps and
-    the seed itself is not included in the output.
-
     :param horizon:   number of days in each path
     :param num_paths: number of independent trajectories
     :param seed_cond: optional (F,) or (num_paths, F) seed in ORIGINAL space. None →
@@ -156,12 +126,12 @@ def generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=None,
              (num_paths, F, horizon) for the [M, N, D] layout in metrics/statistic_temporal.
     """
     model.eval()
-    factor_dim = len(cfg["factors"])
+
     path = []
 
     if seed_cond is None:
         # Day 0: unconditional draw from the null token, then roll forward horizon-1 days.
-        cur, _, _ = _reverse(model, cfg, None, n=num_paths, factor_dim=factor_dim)
+        cur, _, _ = _reverse(model, cfg, None, num_paths)
         path.append(cur)
         n_cond_steps = horizon - 1
     else:
@@ -173,7 +143,7 @@ def generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=None,
         n_cond_steps = horizon
 
     for _ in range(n_cond_steps):
-        cur, _, _ = _reverse(model, cfg, cur, cond_fn=cond_fn,
+        cur, _, _ = _reverse(model, cfg, cur, num_paths, cond_fn=cond_fn,
                              guidance_scale=guidance_scale,
                              guidance_decay_pow=guidance_decay_pow)
         path.append(cur)
@@ -250,7 +220,7 @@ if __name__ == "__main__":
 
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
-    model.load_state_dict(pick_state(ckpt))
+    model.load_state_dict(ckpt["ema_state"])
     scaler = ckpt["scaler"]
 
     horizon    = cfg["seq_len"]

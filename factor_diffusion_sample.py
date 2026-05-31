@@ -208,13 +208,18 @@ def generate_rejection(model, scaler, cfg, cond, *, cond_fn, num_samples=None,
 
 if __name__ == "__main__":
     import yaml
+    import pandas as pd
+    from factor_model import load_model, dump_to_achievement
+
     parser = argparse.ArgumentParser()
     parser.add_argument("exp_name", help="experiment name; loads model/<exp_name>/checkpoints/*.pt")
-
+    parser.add_argument("--seed-oos", action="store_true")
+    parser.add_argument("--seed-date", default=None,
+                        help="specific OOS date (YYYY-MM-DD) to seed from")
     args = parser.parse_args()
 
     prefix = f"model/{args.exp_name}"
-    with open(f"model/{args.exp_name}/cfg.yaml") as f:
+    with open(f"{prefix}/cfg.yaml") as f:
         cfg = yaml.safe_load(f)
 
     ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
@@ -226,10 +231,45 @@ if __name__ == "__main__":
 
     horizon    = cfg["seq_len"]
     num_paths  = cfg["num_generate"]
+    factors    = cfg["factors"]
 
-    paths = generate_path(model, scaler, cfg, horizon, num_paths)
+    cond_seed, dates = None, None
+    if args.seed_oos or args.seed_date is not None:
+        oos = pd.read_csv(f"{prefix}/test/factors.csv", index_col=0, parse_dates=True)[factors]
+        if args.seed_date is not None:
+            seed_ts = pd.Timestamp(args.seed_date)
+            if seed_ts not in oos.index:
+                raise SystemExit(f"--seed-date {args.seed_date} not in OOS index "
+                                 f"({oos.index.min().date()} .. {oos.index.max().date()})")
+            i = oos.index.get_loc(seed_ts)
+        else:
+            i = int(np.random.randint(len(oos) - 1))   # leave at least one following day
+        cond_seed = oos.iloc[i].to_numpy(np.float32)    # (F,) day-t condition, shared by all paths
+        # real OOS trading days for the generated horizon (the path starts at i+1, the day
+        # after the seed). Use the actual calendar so parquet dates align exactly with the
+        # OOS ground truth; only if the horizon runs past the end of OOS do we extend with
+        # synthetic business days.
+        dates = oos.index[i + 1: i + 1 + horizon]
+        if len(dates) < horizon:
+            anchor = (dates[-1] if len(dates) else oos.index[i]) + pd.offsets.BDay(1)
+            dates  = dates.append(pd.bdate_range(anchor, periods=horizon - len(dates)))
+        print(f"[seed] OOS day {oos.index[i].date()} (idx {i}) → "
+              f"path {dates[0].date()} .. {dates[-1].date()}")
 
-    out_path = f"{prefix}/samples/path_{cfg['ckpt_name']}_{num_paths}x{horizon}.npy"
+    paths = generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=cond_seed)
+    paths = paths.transpose(0, 2, 1)                     # (num_paths, F, horizon)
+
     os.makedirs(f"{prefix}/samples", exist_ok=True)
-    np.save(out_path, paths.transpose(0, 2, 1))
-    print(f"Saved {paths.shape} paths (num_paths, horizon, F) → {out_path}")
+    stem = f"{prefix}/samples/path_{cfg['ckpt_name']}_{num_paths}x{horizon}"
+
+    np.save(f"{stem}.npy", paths)
+    print(f"Saved {paths.shape} paths (num_paths, F, horizon) → {stem}.npy")
+
+    model = load_model(prefix)
+    if args.seed_oos or args.seed_date is not None:
+        dump_to_achievement(model, f"{stem}.npy",
+                            out_dir = "achievement/with_date",
+                            dates=dates)
+    else:
+        dump_to_achievement(model, f"{stem}.npy",
+                            out_dir = "achievement")

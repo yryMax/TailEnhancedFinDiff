@@ -10,12 +10,12 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
-def _reverse(model, cfg, cond, n, cond_fn=None, guidance_scale=5.0,
+def _reverse(model, cfg, cond, n=None, vix=None, cond_fn=None, guidance_scale=5.0,
              guidance_decay_pow=1.0):
     """
     1. x_T ~ N(0, barsigmas[T-1]^2 I)
     2. For t = T-1 ... 1, with clean condition `cond` fed at every step:
-           eps_pred = model(x_t, t, cond)
+           eps_pred = model(x_t, t, cond, vix)
            Gamma_t  = 1 - gammas[t]^2 * barsigmas[t-1]^2 / barsigmas[t]^2
            mean     = (x_t - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
            var      = Gamma_t * barsigmas[t-1]^2
@@ -23,12 +23,17 @@ def _reverse(model, cfg, cond, n, cond_fn=None, guidance_scale=5.0,
 
     :param cond: (n, F) clean condition tensor on DEVICE, normalized space. None →
                  unconditional draw from the learned null token
+    :param n:    batch size; inferred from cond.shape[0] when None (cond must be given then)
+    :param vix:  optional (n, 1) normalized VIX condition for this step. None → the model
+                 uses its learned null-VIX token (i.e. not conditioned on VIX)
     :param cond_fn: optional cond_fn(x0_hat) -> per-sample energy; enables gradient guidance
     :param guidance_scale: guidance strength `s`; mean -= s * w_t * var * grad
     :param guidance_decay_pow: exponent p in w_t = (SNR_t / (SNR_t + 1))**p (Karras/EDM SNR weight)
     :return: (x, var_history, grad_history); x is (n, F) normalized tensor on DEVICE
     """
     num_timesteps = cfg["num_timesteps"]
+    if n is None:
+        n = cond.shape[0]
 
     gammas, bargammas, _, barsigmas = levy_noise_schedule(cfg['levy_alpha'], num_timesteps)
     T = len(gammas)
@@ -47,7 +52,7 @@ def _reverse(model, cfg, cond, n, cond_fn=None, guidance_scale=5.0,
     var_history, grad_history = [], []
     for t in range(T - 1, 0, -1):
         t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
-        eps_pred = model(x, t_b, cond)
+        eps_pred = model(x, t_b, cond, vix=vix)
 
         # posterior contraction factor: Gamma_t = beta_t / (1 - bar_alpha_t)
         Gamma_t = 1 - (gammas[t] ** 2 * Sigma2[t - 1]) / (Sigma2[t] + 1e-8)
@@ -67,7 +72,7 @@ def _reverse(model, cfg, cond, n, cond_fn=None, guidance_scale=5.0,
             w_t   = (snr_t / (snr_t + 1.0)) ** guidance_decay_pow
             with torch.enable_grad():
                 x_g        = x.detach().requires_grad_(True)
-                eps_pred_g = model(x_g, t_b, cond)
+                eps_pred_g = model(x_g, t_b, cond, vix=vix)
                 x0_hat     = (x_g - barsigmas[t] * eps_pred_g) / bargammas[t]
                 loss       = cond_fn(x0_hat).sum()
                 grad       = torch.autograd.grad(loss, x_g)[0]
@@ -115,36 +120,62 @@ def generate_uncond(model, scaler, cfg, num_samples):
     x, _, _ = _reverse(model, cfg, None, num_samples)
     return scaler.inverse_transform(x.cpu().numpy())
 
+def vix_cond_gen(vix_cond, length, num_paths, vix_scaler=None):
+    """
+    Expand a VIX spec into a length-`length` list of per-step conditions for the rollout,
+    so the reverse loop is branch-free. Minimal version: constant or None only.
+
+      vix_cond is None  -> [None] * length            (not conditioned on VIX; uses null_vix)
+      vix_cond is scalar -> the same VIX value on every day, shared across all paths
+
+    Each non-None element is a (num_paths, 1) tensor on DEVICE. When `vix_scaler` is given the
+    raw VIX level is mapped to training space by the scaler itself (it encapsulates log +
+    standardize); without a scaler the value is used as-is (assumed already normalized).
+    """
+    if vix_cond is None:
+        return [None] * length
+    v = float(vix_cond)
+    if vix_scaler is not None:
+        v = float(vix_scaler.transform([[v]])[0, 0])           # scaler encapsulates log + standardize
+    step = torch.full((num_paths, 1), v, dtype=torch.float32, device=DEVICE)
+    return [step] * length
+
 
 def generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=None,
-                  cond_fn=None, guidance_scale=5.0, guidance_decay_pow=1.0):
+                  vix_cond=None, vix_scaler=None, cond_fn=None,
+                  guidance_scale=5.0, guidance_decay_pow=1.0):
     """
     :param horizon:   number of days in each path
     :param num_paths: number of independent trajectories
     :param seed_cond: optional (F,) or (num_paths, F) seed in ORIGINAL space. None →
                       self-start from the null token (no seed required).
+    :param vix_cond:  optional constant VIX (shared by all paths/days) or None. Expanded by
+                      vix_cond_gen into a length-horizon per-step sequence; None → no VIX.
+    :param vix_scaler: fitted VIX scaler (from the checkpoint); used to map a raw VIX level
+                      into training space. None → vix_cond is taken as already normalized.
     :return: (num_paths, horizon, F) array in ORIGINAL space. Transpose to
              (num_paths, F, horizon) for the [M, N, D] layout in metrics/statistic_temporal.
     """
     model.eval()
 
+    vix_seq = vix_cond_gen(vix_cond, horizon, num_paths, vix_scaler)   # per-step VIX (None or (num_paths,1))
+
     path = []
 
     if seed_cond is None:
         # Day 0: unconditional draw from the null token, then roll forward horizon-1 days.
-        cur, _, _ = _reverse(model, cfg, None, num_paths)
+        cur, _, _ = _reverse(model, cfg, None, num_paths, vix=vix_seq[0])
         path.append(cur)
-        n_cond_steps = horizon - 1
     else:
         seed = np.asarray(seed_cond, dtype=np.float32)
         if seed.ndim == 1:
             seed = np.broadcast_to(seed, (num_paths, seed.shape[0])).copy()
         assert seed.shape[0] == num_paths, f"seed rows {seed.shape[0]} != num_paths {num_paths}"
         cur = torch.tensor(scaler.transform(seed), dtype=torch.float32, device=DEVICE)
-        n_cond_steps = horizon
 
-    for _ in tqdm(range(n_cond_steps), desc=f"rollout (horizon={horizon})", leave=False):
-        cur, _, _ = _reverse(model, cfg, cur, num_paths, cond_fn=cond_fn,
+    # produce the remaining days; vix_seq[d] aligns with the day d being generated
+    for d in tqdm(range(len(path), horizon), desc=f"rollout (horizon={horizon})", leave=False):
+        cur, _, _ = _reverse(model, cfg, cur, num_paths, vix=vix_seq[d], cond_fn=cond_fn,
                              guidance_scale=guidance_scale,
                              guidance_decay_pow=guidance_decay_pow)
         path.append(cur)
@@ -216,6 +247,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed-oos", action="store_true")
     parser.add_argument("--seed-date", default=None,
                         help="specific OOS date (YYYY-MM-DD) to seed from")
+    parser.add_argument("--vix", type=float, default=None,
+                        help="constant VIX level to condition on (e.g. 40); omit → no VIX")
     args = parser.parse_args()
 
     prefix = f"model/{args.exp_name}"
@@ -227,7 +260,8 @@ if __name__ == "__main__":
     ckpt   = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     model  = FactorDenoiser(**ckpt["model_kwargs"]).to(DEVICE)
     model.load_state_dict(ckpt["ema_state"])
-    scaler = ckpt["scaler"]
+    scaler     = ckpt["scaler"]
+    vix_scaler = ckpt.get("vix_scaler")
 
     horizon    = cfg["seq_len"]
     num_paths  = cfg["num_generate"]
@@ -256,8 +290,13 @@ if __name__ == "__main__":
         print(f"[seed] OOS day {oos.index[i].date()} (idx {i}) → "
               f"path {dates[0].date()} .. {dates[-1].date()}")
 
-    paths = generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=cond_seed)
+    if args.vix is not None and vix_scaler is None:
+        raise SystemExit("--vix given but checkpoint has no vix_scaler (model trained without VIX)")
+    paths = generate_path(model, scaler, cfg, horizon, num_paths, seed_cond=cond_seed,
+                          vix_cond=args.vix, vix_scaler=vix_scaler)
     paths = paths.transpose(0, 2, 1)                     # (num_paths, F, horizon)
+    if args.vix is not None:
+        print(f"[vix] conditioned on constant VIX = {args.vix}")
 
     os.makedirs(f"{prefix}/samples", exist_ok=True)
     stem = f"{prefix}/samples/path_{cfg['ckpt_name']}_{num_paths}x{horizon}"

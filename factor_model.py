@@ -374,8 +374,8 @@ if __name__ == '__main__':
     test_path  = cfg["test_path"]
 
     # stock return to factor return
-    #get_factor_model(train_path, features).save(prefix)
-    #get_factor_model(test_path,  features).save(f"{prefix}/test")
+    get_factor_model(train_path, features).save(prefix)
+    get_factor_model(test_path,  features).save(f"{prefix}/test")
 
-    model = load_model(prefix)
-    dump_to_achievement(model, "model/temporal_cond/samples/path_cond_another_500x22.npy")
+    #model = load_model(prefix)
+    #dump_to_achievement(model, "model/temporal_cond/samples/path_cond_another_500x22.npy")

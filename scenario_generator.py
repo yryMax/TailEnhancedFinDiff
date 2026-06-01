@@ -1,4 +1,5 @@
 from __future__ import annotations
+import warnings
 from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
@@ -17,7 +18,10 @@ class FactorSampler(ABC):
 
     @abstractmethod
     def sample_temporal(self, num_generate: int, seq_len: int,
-                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                        vix_cond: float = None) -> np.ndarray:
+        # vix_cond: optional constant VIX regime to condition on; ignored by samplers
+        # that have no VIX notion (ResampleSampler, GaussianSampler).
         pass
 
     @abstractmethod
@@ -43,10 +47,13 @@ class ResampleSampler(FactorSampler):
         return self.factors[idx]
 
     def sample_temporal(self, num_generate: int, seq_len: int,
-                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                        vix_cond: float = None) -> np.ndarray:
         """
         stationary boostrap
         """
+        if vix_cond is not None:
+            warnings.warn("ResampleSampler ignores vix_cond (no VIX notion).")
         if cond_fn is not None:
             raise NotImplementedError(
                 "ResampleSampler.sample_temporal: per-day conditioning is not "
@@ -114,11 +121,14 @@ class GaussianSampler(FactorSampler):
         return self.rng.multivariate_normal(mean=self.mean, cov=self.cov, size=num_generate)
 
     def sample_temporal(self, num_generate: int, seq_len: int,
-                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                        vix_cond: float = None) -> np.ndarray:
         """
         Per-path EWMA Gaussian rollout. When `cond_fn` is given, each day's
         draw is soft-rejected (accept prob exp(-self.guidance_scale * energy)).
         """
+        if vix_cond is not None:
+            warnings.warn("GaussianSampler ignores vix_cond (no VIX notion).")
         F   = self._F.shape[1]
         lam = self.ewma_lambda
         mu  = self.mean
@@ -191,6 +201,7 @@ class DiffusionSampler(FactorSampler):
         self.model.load_state_dict(ckpt["ema_state"])
         self.model.eval()
         self.scaler = ckpt["scaler"]
+        self.vix_scaler = ckpt.get("vix_scaler")          # None if trained without VIX
         self.guidance_scale = guidance_scale
         self.guidance_decay_pow = guidance_decay_pow
         self.cfg = ckpt["cfg"]
@@ -200,12 +211,18 @@ class DiffusionSampler(FactorSampler):
         return generate_uncond(self.model, self.scaler, self.cfg, num_generate)   # (N, F)
 
     def sample_temporal(self, num_generate: int, seq_len: int,
-                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
+                        cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                        vix_cond: float = None) -> np.ndarray:
         """Self-starting autoregressive rollout, returned as (N, F, seq_len).
         cond_fn is applied per-day via gradient guidance through generate_path.
+        vix_cond: optional constant VIX level to condition the whole path on; None → VIX-free.
         """
+        if vix_cond is not None and self.vix_scaler is None:
+            raise ValueError("vix_cond given but checkpoint has no vix_scaler "
+                             "(model trained without VIX).")
         paths = generate_path(self.model, self.scaler, self.cfg,
                               horizon=seq_len, num_paths=num_generate,
+                              vix_cond=vix_cond, vix_scaler=self.vix_scaler,
                               cond_fn=cond_fn, guidance_scale=self.guidance_scale,
                               guidance_decay_pow=self.guidance_decay_pow)         # (N, seq_len, F)
         return paths.transpose(0, 2, 1)                                           # (N, F, seq_len)
@@ -228,8 +245,10 @@ class ScenarioGenerator:
         return self.sampler.sample_crossectional(num_generate)
 
     def factor_generate_temporal(self, num_generate: int, seq_len: int,
-                                  cond_fn: Callable[[torch.Tensor], torch.Tensor] = None) -> np.ndarray:
-        return self.sampler.sample_temporal(num_generate, seq_len, cond_fn=cond_fn)
+                                  cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
+                                  vix_cond: float = None) -> np.ndarray:
+        return self.sampler.sample_temporal(num_generate, seq_len, cond_fn=cond_fn,
+                                            vix_cond=vix_cond)
 
     def cond_factor_generate(self, num_generate: int, cond_fn: Callable[[torch.Tensor], torch.Tensor]) -> np.ndarray:
         return self.sampler.cond_generate(num_generate, cond_fn)
@@ -247,15 +266,20 @@ class ScenarioGenerator:
     def stock_generate_temporal(self, num_generate: int, seq_len: int,
                                  cond_fn: Callable[[torch.Tensor], torch.Tensor] = None,
                                  fs_cache: str = None,
-                                 return_components: bool = False):
+                                 return_components: bool = False,
+                                 vix_cond: float = None):
         """
         Generate temporal stock returns by sampling factor paths then mapping through
         the factor model with fresh idiosyncratic noise per (path, day).
 
         :param fs_cache: optional .npy path for factor paths. If the file exists,
                          load it instead of regenerating (must match shape (N, F, T)).
-                         If missing, generate and save there.
+                         If missing, generate and save there. NOTE: when loading from
+                         cache, `vix_cond` has no effect (the cached paths are used as-is).
         :param return_components: if True, return (R, systematic, idiosyncratic) each (N, S, T).
+        :param vix_cond: optional constant VIX level to condition factor paths on (passed
+                         through to the sampler); None → VIX-free. Ignored by non-diffusion
+                         samplers and when loading from `fs_cache`.
         :return: (num_generate, S, seq_len) stock returns; or 3-tuple of same shape.
         """
         import os
@@ -264,7 +288,8 @@ class ScenarioGenerator:
             assert fs.shape[0] == num_generate and fs.shape[2] == seq_len, \
                 f"cached fs shape {fs.shape} != (num_generate={num_generate}, F, seq_len={seq_len})"
         else:
-            fs = self.factor_generate_temporal(num_generate, seq_len, cond_fn=cond_fn)  # (N, F, T)
+            fs = self.factor_generate_temporal(num_generate, seq_len, cond_fn=cond_fn,
+                                               vix_cond=vix_cond)                       # (N, F, T)
             if fs_cache is not None:
                 os.makedirs(os.path.dirname(fs_cache) or ".", exist_ok=True)
                 np.save(fs_cache, fs)

@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, FunctionTransformer
+from sklearn.pipeline import make_pipeline
 from factor_diffusion_levy import levy_noise_schedule, sample_skewed_levy
 import matplotlib.pyplot as plt
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -18,11 +19,30 @@ def load_cfg(exp_name: str) -> dict:
         return yaml.safe_load(f)
 
 
-def load_data(csv_path, factor_names):
-    X = pd.read_csv(csv_path, index_col=0)[factor_names].dropna().values.astype(np.float32)
+def load_data(csv_path, factor_names, vix_path=None):
+    """
+    Load factor returns (rows = trading days, cols = factors), standardized.
+
+    If `vix_path` is given, also load VIXCLS, align it to the factor trading days (forward-
+    then-backward fill the ~302 FRED gaps), take log, and standardize. VIX is conditioned at
+    the SAME day as each row, so the caller pairs vix[i+1] with target X[i+1].
+
+    :return: (X_norm, scaler, vix_norm, vix_scaler). vix_norm/vix_scaler are None when
+             vix_path is None. X_norm is (T, F); vix_norm is (T, 1).
+    """
+    df = pd.read_csv(csv_path, index_col=0)[factor_names].dropna()
+    X  = df.values.astype(np.float32)
     scaler = StandardScaler().fit(X)
     X_norm = scaler.transform(X)
-    return X_norm, scaler
+
+    dates = pd.to_datetime(df.index)
+    v = pd.read_csv(vix_path, parse_dates=["observation_date"]).set_index("observation_date")["VIXCLS"]
+    v = v.reindex(dates).ffill().bfill()                       # align to factor days; fill FRED gaps
+    v_raw      = v.to_numpy(dtype=np.float32)[:, None]         # (T, 1) raw VIX level
+    vix_scaler = make_pipeline(
+        FunctionTransformer(np.log, inverse_func=np.exp, check_inverse=False), StandardScaler())
+    vix_norm   = vix_scaler.fit_transform(v_raw).astype(np.float32)
+    return X_norm, scaler, vix_norm, vix_scaler
 
 
 class DiTBlock(nn.Module):
@@ -82,6 +102,9 @@ class FactorDenoiser(nn.Module):
             nn.Linear(num_factors, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
         self.null_cond = nn.Parameter(torch.zeros(1, cond_dim))                     # learned "no condition" token (BOS)
         self.feature_cond_embed = nn.Parameter(torch.randn(1, num_factors, cond_dim) * 0.02)  # per-factor cond id
+        self.vix_embed = nn.Sequential(                                            # scalar VIX → context
+            nn.Linear(1, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+        self.null_vix = nn.Parameter(torch.zeros(1, cond_dim))                      # learned "no VIX" token
         self.blocks = nn.ModuleList([DiTBlock(dim, n_heads, cond_dim) for _ in range(num_blocks)])
         self.norm_out = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ada_out  = nn.Linear(cond_dim, 2 * dim)                                # final AdaLN-Zero
@@ -89,14 +112,19 @@ class FactorDenoiser(nn.Module):
         nn.init.zeros_(self.ada_out.bias)
         self.out_proj = nn.Linear(dim, 1)                                          # token → scalar
 
-    def forward(self, x, t, c=None, cond_drop_mask=None):
+    def forward(self, x, t, c=None, vix=None, cond_drop_mask=None, vix_drop_mask=None):
         """
         :param x: noisy target factor returns (day t+1), shape (B, F)
         :param t: timestep indices, shape (B,)
         :param c: clean condition factor returns (day t), shape (B, F); None → fully
                   unconditional (every sample uses the learned null token).
+        :param vix: scalar VIX condition, shape (B, 1); None → use the learned null-VIX
+                  token (sample not conditioned on VIX). Added to the context so a single
+                  model covers both VIX-conditioned and VIX-free generation.
         :param cond_drop_mask: optional bool (B,); True rows use the null token instead
                   of cond_mlp(c). Used for condition dropout during training
+        :param vix_drop_mask: optional bool (B,); True rows use the null-VIX token instead
+                  of vix_embed(vix). Independent VIX dropout (CFG) during training
         :return: predicted noise, shape (B, F)
         """
         e_t  = self.t_embed(self.t_sin(t))                            # (B, cond_dim)
@@ -106,6 +134,13 @@ class FactorDenoiser(nn.Module):
             ctx = self.cond_mlp(c)                                    # (B, cond_dim) full prev cross-section
             if cond_drop_mask is not None:
                 ctx = torch.where(cond_drop_mask[:, None], self.null_cond, ctx)
+        if vix is None:
+            ctx = ctx + self.null_vix                                # (B, cond_dim) "no VIX"
+        else:
+            vctx = self.vix_embed(vix)                               # (B, cond_dim) from scalar VIX
+            if vix_drop_mask is not None:
+                vctx = torch.where(vix_drop_mask[:, None], self.null_vix, vctx)
+            ctx = ctx + vctx
         cond = ctx[:, None, :] + self.feature_cond_embed + e_t[:, None, :]   # (B, F, cond_dim) per-token
         h = self.in_proj(x.unsqueeze(-1)) + self.feature_embed       # (B, F, dim)
         for blk in self.blocks:
@@ -114,7 +149,8 @@ class FactorDenoiser(nn.Module):
         h = self.norm_out(h) * (1 + g) + b
         return self.out_proj(h).squeeze(-1)                          # (B, F)
 
-def dlpm_loss(model, x, c, t, bg, bs, alpha, device, cond_drop_prob=0.0):
+def dlpm_loss(model, x, c, t, bg, bs, alpha, device, cond_drop_prob=0.0,
+              vix=None, vix_drop_prob=0.0):
     """
     DLPM epsilon-prediction loss (single-sample MSE).
 
@@ -124,13 +160,19 @@ def dlpm_loss(model, x, c, t, bg, bs, alpha, device, cond_drop_prob=0.0):
     null token with probability `cond_drop_prob`. This teaches the model the marginal
     p(F_0) (no previous day) alongside the transition p(F_{t+1}|F_t), so sampling can
     self-start a path without an external seed.
+
+    VIX dropout is INDEPENDENT of the factor-condition dropout (separate Bernoulli), so the
+    model jointly learns p(.|F_t, VIX), p(.|F_t), p(.|VIX) and p(.) — i.e. it can generate
+    with or without the VIX condition from a single set of weights.
     """
-    B, D  = x.shape
-    drop  = torch.rand(B, device=device) < cond_drop_prob   # (B,) True → use null token
-    a     = sample_skewed_levy(alpha, (B, D), device)
-    eps_t = a.sqrt() * torch.randn_like(a)
-    x_t   = bg * x + bs * eps_t
-    return (model(x_t, t, c, cond_drop_mask=drop) - eps_t).pow(2).mean()
+    B, D     = x.shape
+    drop     = torch.rand(B, device=device) < cond_drop_prob   # (B,) True → use null cond token
+    a        = sample_skewed_levy(alpha, (B, D), device)
+    eps_t    = a.sqrt() * torch.randn_like(a)
+    x_t      = bg * x + bs * eps_t
+    vix_drop = None if vix is None else (torch.rand(B, device=device) < vix_drop_prob)
+    pred = model(x_t, t, c, vix=vix, cond_drop_mask=drop, vix_drop_mask=vix_drop)
+    return (pred - eps_t).pow(2).mean()
 
 
 def plot_loss(losses, loss_plot_path):
@@ -146,22 +188,25 @@ def plot_loss(losses, loss_plot_path):
 
 
 def train(model, loader, optimizer, scaler, cfg, ckpt_path,
-          loss_plot_path="assets/factor_loss.png"):
+          loss_plot_path="assets/factor_loss.png", vix_scaler=None):
     """
     Train DLPM denoiser.
 
     :param model: FactorDenoiser
-    :param loader: DataLoader yielding (c, x) batches — c=day-t condition, x=day-(t+1) target
+    :param loader: DataLoader yielding (c, x) or (c, vix, x) batches — c=day-t condition,
+                   x=day-(t+1) target, vix=day-(t+1) VIX condition.
     :param optimizer: torch optimizer
     :param scaler: fitted StandardScaler (saved into ckpt)
     :param cfg: dict with epochs, num_timesteps, levy_alpha
     :param ckpt_path: full path to write checkpoint
+    :param vix_scaler: fitted VIX scaler (saved into ckpt for inference); None if no VIX
     """
 
     epochs         = cfg["epochs"]
     num_timesteps  = cfg["num_timesteps"]
     levy_alpha     = cfg["levy_alpha"]
     cond_drop_prob = cfg.get("cond_drop_prob", 0.1)
+    vix_drop_prob  = cfg.get("cond_drop_prob_vix", 0.15)
     ema_decay      = cfg.get("ema_decay", 0.999)
 
     _, bargammas, _, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
@@ -176,7 +221,12 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
-        for (c, x) in loader:
+        for batch in loader:
+            if len(batch) == 3:
+                c, vix, x = batch
+                vix = vix.to(DEVICE)
+            else:
+                (c, x), vix = batch, None
             c   = c.to(DEVICE)
             x   = x.to(DEVICE)
             t   = torch.randint(1, num_timesteps, (x.size(0),), device=DEVICE)
@@ -184,7 +234,8 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
             bs  = barsigmas_d[t].unsqueeze(-1)
 
             loss = dlpm_loss(model, x, c, t, bg, bs, levy_alpha, DEVICE,
-                             cond_drop_prob=cond_drop_prob)
+                             cond_drop_prob=cond_drop_prob,
+                             vix=vix, vix_drop_prob=vix_drop_prob)
 
             optimizer.zero_grad()
             loss.backward()
@@ -210,6 +261,7 @@ def train(model, loader, optimizer, scaler, cfg, ckpt_path,
         "ema_state":     ema,
         "model_kwargs":  model.kwargs,
         "scaler":        scaler,
+        "vix_scaler":    vix_scaler,
         "cfg":           cfg,
     }, ckpt_path)
 
@@ -223,12 +275,16 @@ if __name__ == "__main__":
     cfg    = load_cfg(args.exp_name)
     prefix = f"model/{args.exp_name}"
     data_file = cfg.get("data_file")
-    X, scaler = load_data(f"{prefix}/{data_file}", cfg["factors"])
-    cond_np   = torch.tensor(X[:-1])
-    target_np = torch.tensor(X[1:])
-    loader    = DataLoader(TensorDataset(cond_np, target_np), batch_size=cfg["batch_size"], shuffle=True)
+    vix_file  = cfg.get("vix_file")
+    X, scaler, vix_norm, vix_scaler = load_data(f"{prefix}/{data_file}", cfg["factors"], vix_file)
+
+    cond_np   = torch.tensor(X[:-1])                      # day t
+    target_np = torch.tensor(X[1:])                       # day t+1
+    vix_np  = torch.tensor(vix_norm[1:])             # VIX at day t+1 (same day as target)
+    dataset = TensorDataset(cond_np, vix_np, target_np)
+    loader    = DataLoader(dataset, batch_size=cfg["batch_size"], shuffle=True)
     model     = FactorDenoiser(num_factors=len(cfg["factors"])).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=1e-4)
 
     ckpt_path = f"{prefix}/checkpoints/{cfg['ckpt_name']}.pt"
-    train(model, loader, optimizer, scaler, cfg, ckpt_path)
+    train(model, loader, optimizer, scaler, cfg, ckpt_path, vix_scaler=vix_scaler)

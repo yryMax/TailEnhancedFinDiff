@@ -125,6 +125,90 @@ def generate(model, scaler, cfg, num_samples=None, cond_fn=None,
     return scaler.inverse_transform(torch.cat(batches).numpy()), var_history, grad_history
 
 
+@torch.no_grad()
+def generate_style_transfer(model, scaler, cfg, x0_obs, cond_fn, *,
+                    strength=0.6, guidance_scale=5.0, guidance_decay_pow=1.0):
+    """
+    :param x0_obs:   (N, factor_dim) observed factor vectors in *raw* units; the scaler
+                     normalizes them internally.
+    :param cond_fn:  cond_fn(x0_hat) -> per-sample loss; defines the scenario the transfer
+                     steers toward (required — without a condition there is nothing to transfer).
+    :param strength: fraction of the diffusion horizon to re-noise, in (0, 1].
+    :return: (samples_ndarray, var_history, grad_history) — same convention as generate().
+    """
+    levy_alpha    = cfg["levy_alpha"]
+    num_timesteps = cfg["num_timesteps"]
+    batch_size    = cfg["batch_size"]
+    factor_dim    = model.feature_embed.shape[1]
+
+    x0_all = np.asarray(scaler.transform(np.asarray(x0_obs, dtype=np.float32)),
+                        dtype=np.float32)
+    num_samples = x0_all.shape[0]
+
+    gammas, bargammas, sigmas, barsigmas = levy_noise_schedule(levy_alpha, num_timesteps)
+    T = len(gammas)
+    gammas    = gammas.to(DEVICE)
+    bargammas = bargammas.to(DEVICE)
+    sigmas    = sigmas.to(DEVICE)
+    barsigmas = barsigmas.to(DEVICE)
+
+    t_star = int(round(strength * (T - 1)))
+    t_star = max(1, min(T - 1, t_star))
+
+    model.eval()
+    batches = []
+    var_history = []
+    grad_history = []
+
+    for start in range(0, num_samples, batch_size):
+        n     = min(batch_size, num_samples - start)
+        shape = (n, factor_dim)
+        x0    = torch.tensor(x0_all[start:start + n], device=DEVICE)
+
+        A = [sample_skewed_levy(levy_alpha, shape, DEVICE) for _ in range(t_star + 1)]
+        Sigmas = [sigmas[0] ** 2 * A[0]]
+        for t in range(1, t_star + 1):
+            Sigmas.append(sigmas[t] ** 2 * A[t] + gammas[t] ** 2 * Sigmas[-1])
+
+        z_init = torch.randn(n, factor_dim, device=DEVICE)
+        x = bargammas[t_star] * x0 + Sigmas[t_star].sqrt() * z_init
+
+        for t in range(t_star, 0, -1):
+            t_b      = torch.full((n,), t, dtype=torch.long, device=DEVICE)
+            eps_pred = model(x, t_b)
+
+            Sigma_t  = Sigmas[t]
+            Sigma_t1 = Sigmas[t - 1]
+
+            Gamma_t = 1 - (gammas[t] ** 2 * Sigma_t1) / (Sigma_t + 1e-8)
+            mean = (x - barsigmas[t] * Gamma_t * eps_pred) / gammas[t]
+            var = (Gamma_t * Sigma_t1).clamp(min=0.0)
+
+            if start == 0:
+                var_history.append((t, float(var.mean()), float(var.max())))
+
+            if t > 1:
+                snr_t = bargammas[t] ** 2 / (barsigmas[t] ** 2 + 1e-8)
+                w_t   = (snr_t / (snr_t + 1.0)) ** guidance_decay_pow
+                with torch.enable_grad():
+                    x_g        = x.detach().requires_grad_(True)
+                    eps_pred_g = model(x_g, t_b)
+                    x0_hat     = (x_g - barsigmas[t] * eps_pred_g) / bargammas[t]
+                    loss       = cond_fn(x0_hat).sum()
+                    grad       = torch.autograd.grad(loss, x_g)[0]
+                if start == 0:
+                    grad_history.append((t, float(grad.mean()), float(grad.max()), float(w_t)))
+                mean = mean - guidance_scale * w_t * var * grad.detach()
+
+                x = mean + var.sqrt() * torch.randn_like(x)
+            else:
+                x = mean
+
+        batches.append(x.cpu())
+
+    return scaler.inverse_transform(torch.cat(batches).numpy()), var_history, grad_history
+
+
 def generate_rejection(model, scaler, cfg, *, cond_fn, num_samples=None,
                        guidance_scale=1.0, max_batches=50000, L=None):
     """

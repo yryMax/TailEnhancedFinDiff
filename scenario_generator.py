@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 import torch
-
+from factor_diffusion_sample import generate_style_transfer
 from factor_diffusion_train import FactorDenoiser
 from factor_model import FactorModel, reconstruct_returns
 from collections.abc import Callable
@@ -137,6 +137,14 @@ class DiffusionSampler(FactorSampler):
         )
         return samples
 
+    def transfer(self, x0_obs: np.ndarray, cond_fn: Callable[[torch.Tensor], torch.Tensor],
+                 strength: float = 0.6) -> np.ndarray:
+        samples, _, _ = generate_style_transfer(
+            self.model, self.scaler, self.cfg, x0_obs, cond_fn, strength=strength,
+            guidance_scale=self.guidance_scale, guidance_decay_pow=self.guidance_decay_pow,
+        )
+        return samples
+
 class ScenarioGenerator:
     def __init__(self, model: FactorModel, sampler: FactorSampler):
         self.model = model
@@ -156,6 +164,28 @@ class ScenarioGenerator:
             fs = self.factor_generate(num_generate)
 
         fs_full = np.column_stack([np.ones((len(fs), 1)), fs])
-            
+
         returns = reconstruct_returns(self.model, fs_full)
         return returns
+
+    def style_transfer_oos(self, oos_factors: np.ndarray,
+                           cond_fn: Callable[[torch.Tensor], torch.Tensor],
+                           strength: float = 0.6):
+        """
+        Per-day OOS style transfer. Each row of `oos_factors` is one observed OOS day; the whole
+        panel is processed as a single batch (the batch holds different days, one counterfactual
+        per day). The scenario is carried by `cond_fn` (guidance); each day's identity by the
+        SDEdit anchor. Loadings/residuals come from self.model (the train model).
+
+        :param oos_factors: (D, factor_dim) raw observed OOS factors, alpha column dropped,
+                            column order matching the diffusion scaler / self.model.F.
+        :param cond_fn:     scenario condition cond_fn(x0_hat) -> per-sample loss.
+        :param strength:    SDEdit strength in (0, 1].
+        :return: (cf_factors (D, factor_dim), cf_returns (D, S)); rows align 1:1 with OOS days.
+        """
+        x0_obs = np.asarray(oos_factors, dtype=np.float32)
+        cf_factors = self.sampler.transfer(x0_obs, cond_fn, strength=strength)
+
+        fs_full = np.column_stack([np.ones((len(cf_factors), 1)), cf_factors])
+        cf_returns = reconstruct_returns(self.model, fs_full)
+        return cf_factors, cf_returns

@@ -115,6 +115,9 @@ class FactorModel:
     # factor names used to build F
     features: list = field(default_factory=list)
 
+    # csecid column order of beta/residuals (S,); needed to map (T,S) matrices back to a panel
+    stock_ids: list = field(default_factory=list)
+
     # parquet path(s) used to fit the model
     data_source: str = ""
 
@@ -138,6 +141,7 @@ class FactorModel:
             factor_columns=np.array(self.F.columns.tolist()),
             factor_index=np.array(self.F.index.astype(str).tolist()),
             features=np.array(self.features),
+            stock_ids=np.array(self.stock_ids),
             data_source=np.array(self.data_source)
         )
 
@@ -153,6 +157,8 @@ class FactorModel:
         F = pd.read_csv(f"{prefix}/factors.csv", index_col=0, parse_dates=True)
 
         npz = np.load(f"{prefix}/model.npz", allow_pickle=True)
+        # stock_ids added later; fall back to empty for models saved before it existed
+        stock_ids = npz["stock_ids"].tolist() if "stock_ids" in npz.files else []
         return cls(
             F=F,
             beta=npz["beta"],
@@ -161,6 +167,7 @@ class FactorModel:
             residuals=npz["residuals"],
             factor_type=str(npz["factor_type"]),
             features=npz["features"].tolist(),
+            stock_ids=stock_ids,
             data_source=npz["data_source"].tolist(),
         )
 
@@ -215,7 +222,8 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
 
     factor_type = "portsort" if "alpha" not in F.columns else "regression"
     return FactorModel(F=F_aligned, beta=beta, res_std=res_std, res_df=res_df,
-                       residuals=residuals, factor_type=factor_type, data_source=path)
+                       residuals=residuals, factor_type=factor_type,
+                       stock_ids=list(R_aligned.columns), data_source=path)
 
 
 def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
@@ -240,6 +248,58 @@ def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
 
     idiosyncratic = noise * model.res_std
     return systematic + idiosyncratic
+
+
+def returns_to_panel(model: FactorModel, generated_returns: np.ndarray, *,
+                     factor_dates=None, source_df=None, shift=True,
+                     only_filled=False) -> pd.DataFrame:
+    """
+    Inverse of get_factor_model's return extraction: write a (T, S) generated-return matrix back
+    into the original long-panel schema [date, csecid, returns, *features], overwriting ONLY the
+    `returns` column. date / csecid / characteristics are kept exactly as in the source panel.
+
+    :param model:             fitted model; supplies stock_ids (csecid column order of beta) and,
+                              by default, the source parquet (model.data_source).
+    :param generated_returns: (T, S) counterfactual stock returns, e.g. cf_returns. Columns must
+                              follow model.stock_ids; rows follow `factor_dates`.
+    :param factor_dates:      (T,) factor dates the rows correspond to. Defaults to model.F.index.
+    :param source_df:         panel to copy structure/features from. Defaults to reading
+                              model.data_source. Must contain columns [date, csecid, returns, ...].
+    :param shift:             if True, row at factor date t is written at the NEXT panel date
+                              (mirrors fit_beta: factor_t predicts return_{t+1}). Set False to
+                              write at factor_dates directly.
+    :param only_filled:       if True, return just the overwritten (date, csecid) rows; otherwise
+                              return the full panel with the rest of `returns` untouched.
+    :return: long-panel DataFrame, same columns as source_df.
+    """
+    if source_df is None:
+        source_df = pd.read_parquet(model.data_source)
+    if factor_dates is None:
+        factor_dates = list(model.F.index)
+
+    stock_ids = list(model.stock_ids) if len(model.stock_ids) else sorted(source_df["csecid"].unique())
+    generated_returns = np.asarray(generated_returns)
+    if generated_returns.shape != (len(factor_dates), len(stock_ids)):
+        raise ValueError(f"generated_returns {generated_returns.shape} != "
+                         f"(T={len(factor_dates)}, S={len(stock_ids)}); check row/col alignment")
+
+    if shift:
+        dates_sorted = sorted(source_df["date"].unique())
+        nxt = {dates_sorted[i]: dates_sorted[i + 1] for i in range(len(dates_sorted) - 1)}
+        row_dates = [nxt[d] for d in factor_dates]   # KeyError if a factor date is the last panel date
+    else:
+        row_dates = list(factor_dates)
+
+    gen_long = (pd.DataFrame(generated_returns,
+                             index=pd.Index(row_dates, name="date"),
+                             columns=pd.Index(stock_ids, name="csecid"))
+                .stack().rename("_returns_gen").reset_index())
+
+    out = source_df.merge(gen_long, on=["date", "csecid"], how="left")
+    filled = out["_returns_gen"].notna()
+    out["returns"] = out["_returns_gen"].where(filled, out["returns"])
+    out = out.drop(columns="_returns_gen")
+    return out[filled.values].reset_index(drop=True) if only_filled else out
 
 
 def save_model(model: FactorModel, prefix: str) -> None:

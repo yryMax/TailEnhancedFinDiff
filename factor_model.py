@@ -308,10 +308,29 @@ def save_model(model: FactorModel, prefix: str) -> None:
 def load_model(prefix: str) -> FactorModel:
     return FactorModel.load(prefix)
 
+def re_normalizing(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    """
+    Sector-neutralize characteristics: cross-sectionally z-score each feature within
+    every (date, GICS sector) group, so a characteristic carries no sector-level mean
+    or scale and the fitted factors are not contaminated by static sector tilts.
+
+    :param df:       long panel with columns [date, csecid, returns, *features, gics, ...]
+    :param features: characteristic columns to renormalize
+    :return:         copy of df with each feature replaced by its per-(date, sector) z-score;
+                     all other columns (including original row order and index) are preserved
+    """
+    out = df.copy()
+    grp = out.groupby(["date", "gics"], dropna=False)   # keep rows with missing gics as their own bucket
+    for f in features:
+        mean = grp[f].transform("mean")
+        std  = grp[f].transform("std")           # NaN for singleton groups
+        out[f] = (out[f] - mean) / std.where(std > 0, 1.0)   # guard zero/degenerate std
+    return out
 
 def get_factor_model(path: str, features: list[str]) -> FactorModel:
     df   = pd.read_parquet(path)
-    R, F = build_regression_factors(df, features)
+    processed_df = re_normalizing(df, features)
+    R, F = build_regression_factors(processed_df, features)
     model = fit_beta(F, R, path)
     return model
 
@@ -327,8 +346,8 @@ if __name__ == '__main__':
 
     features   = cfg["characteristics"]
     train_path = cfg["train_path"]
-    #test_path  = cfg["test_path"]
+    test_path  = cfg["test_path"]
 
-    #print(f"Factor model on {prefix}  (train={train_path}, test={test_path})")
+    print(f"Factor model on {prefix}  (train={train_path}, test={test_path})")
     get_factor_model(train_path, features).save(prefix)
-    #get_factor_model(test_path,  features).save(f"{prefix}/test")
+    get_factor_model(test_path,  features).save(f"{prefix}/test")

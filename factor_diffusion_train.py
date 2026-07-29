@@ -244,7 +244,14 @@ def build_denoiser(ckpt: dict, device=None):
     cls    = FactorDenoiser if is_conditional_ckpt(ckpt) else FactorDenoiserXS
     model  = cls(**ckpt["model_kwargs"]).to(device)
     state  = ckpt.get("ema_state") or ckpt["model_state"]
-    model.load_state_dict(state)
+    missing = set(model.state_dict()) - set(state)
+    if missing and all(k.startswith(("vix_embed", "null_vix")) for k in missing):
+        # pre-VIX conditional checkpoint: the VIX machinery was added later. Loading
+        # non-strict is exact for vix=None inference — null_vix is zero-initialized
+        # (ctx += 0) and vix_embed is never evaluated without a vix input.
+        model.load_state_dict(state, strict=False)
+    else:
+        model.load_state_dict(state)
     model.eval()
     return model
 

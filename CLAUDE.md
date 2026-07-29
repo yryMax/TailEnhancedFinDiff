@@ -441,3 +441,102 @@ For DLPM ($\alpha<2$), the constraint is $\bar\gamma_t^\alpha + \bar\sigma_t^\al
 - `grad_history` now logs `(t, grad_mean, grad_max, w_t)` so you can plot the effective schedule.
 
 ---
+
+# VIX Conditioning (optional exogenous regime signal)
+
+## Goal
+
+Let the temporal model optionally condition the next-day factor cross-section on a **market
+volatility regime** given by the CBOE VIX (`data/VIXCLS.csv`), *without losing the ability to
+generate VIX-free*. One set of weights must serve both:
+
+- `p(F_{t+1} \mid F_t, \mathrm{VIX})` — stress-scenario generation ("given tomorrow's VIX is 40, …")
+- `p(F_{t+1} \mid F_t)` — the original behavior, when no VIX is supplied
+
+## Why this is the clean fix (vs. gradient guidance)
+
+The existing energy/gradient guidance only moves the constrained coordinate and — because
+`eps_pred` is detached — produces **no cross-factor co-movement** (see "Conditional
+Generation: Missing Cross-Factor Co-movement"). Conditioning on VIX as a **trained input**
+sidesteps that entirely: the cross-factor response to a volatility regime is learned
+end-to-end, so a high-VIX condition moves *all* factors as they co-move in the training data.
+No detach problem, no per-step gradient.
+
+## Mechanism: a second null-token (independent CFG)
+
+VIX is just another scalar context added into the per-token condition `ctx`. It gets its own
+**learned null token** so it can be present or absent independently of the factor condition:
+
+```python
+# FactorDenoiser.__init__
+self.vix_embed = nn.Sequential(nn.Linear(1, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
+self.null_vix  = nn.Parameter(torch.zeros(1, cond_dim))
+
+# FactorDenoiser.forward(x, t, c, vix, cond_drop_mask, vix_drop_mask)
+if vix is None:
+    ctx = ctx + self.null_vix                       # "no VIX"
+else:
+    vctx = self.vix_embed(vix)                      # (B, cond_dim)
+    if vix_drop_mask is not None:
+        vctx = torch.where(vix_drop_mask[:, None], self.null_vix, vctx)
+    ctx = ctx + vctx
+```
+
+During training, `vix` is dropped with **independent** probability `cond_drop_prob_vix`
+(separate Bernoulli from the factor-condition dropout). The four combinations teach the
+model `p(·|F_t,VIX)`, `p(·|F_t)`, `p(·|VIX)`, `p(·)` jointly — so "optionally conditioned" is
+the *default product* of this design, not extra machinery, and a single checkpoint covers it.
+
+## Data alignment & timing
+
+- **Timing: VIX at day t+1** — the same day as the target `x = X[1:]`, not the seed day. This
+  is what makes it a forward "regime" knob: at rollout you supply the VIX of the day being
+  generated. Training pairs are `(c=X[i], vix=vix_norm[i+1], x=X[i+1])`.
+- **Transform: log + standardize.** VIX is right-skewed (9–80, spikes to ~83); `log` makes it
+  closer to Gaussian for the linear embedding, then `StandardScaler`. The fitted `vix_scaler`
+  is saved in the checkpoint so inference uses the identical transform.
+- **Gaps:** FRED encodes ~302 market-holiday rows as missing; aligned to the factor calendar
+  and `ffill().bfill()`-ed. The 2025 OOS window is fully covered.
+
+## Sampling: branch-free rollout via an adaptor
+
+`vix_cond_gen(vix_cond, length, num_paths, vix_scaler)` normalizes the user spec into a
+length-`horizon` per-step sequence so the reverse loop never branches on "VIX or not":
+
+- `vix_cond is None`  → `[None] * length`            (every step uses `null_vix`)
+- `vix_cond` scalar   → constant trajectory, shared across all paths (log+standardized via `vix_scaler`)
+
+`_reverse(..., vix=...)` takes a single step's `(n,1)` tensor (or `None`) and feeds it to the
+model; `generate_path` indexes `vix_seq[d]` for the day `d` being generated. Only constant /
+None are implemented now — a full per-day VIX *trajectory* (e.g. the real OOS VIX path, or a
+synthetic mean-reverting one) is the intended extension point in `vix_cond_gen`.
+
+## Optional CFG amplification (not implemented yet)
+
+Plain conditioning (feed VIX, one forward) already biases generation. If the VIX effect comes
+out too weak, classifier-free guidance can amplify it:
+`eps = eps(F_t) + w·(eps(F_t,VIX) − eps(F_t))` with `w>1` (two forwards). `w=0` ≡ unconditional,
+`w=1` ≡ plain conditional. This is the clean (no-detach) guidance and is orthogonal to the
+existing energy guidance. Left out of the minimal version; add only if needed.
+
+## Knobs
+
+- `cfg["vix_file"]` (e.g. `data/VIXCLS.csv`): enables VIX in `load_data`. Absent → no VIX, old behavior.
+- `cfg["cond_drop_prob_vix"]` (default 0.15): independent VIX dropout during training.
+- `--vix <level>` on `factor_diffusion_sample.py`: constant VIX to condition on; omit → VIX-free.
+
+## Status: requires retraining
+
+`null_vix` / `vix_embed` are new parameters, so pre-VIX checkpoints will not load with
+`strict=True`. This is intentional — train fresh with `vix_file` set. Backward compatibility
+was explicitly *not* a goal.
+
+## Code Waypoints
+
+- Model: `FactorDenoiser.__init__` / `forward` (`vix`, `vix_drop_mask`, `null_vix`) in `factor_diffusion_train.py`.
+- Loss: `dlpm_loss(..., vix=, vix_drop_prob=)` — independent dropout Bernoulli.
+- Data: `load_data(csv, factors, vix_path)` returns `(X_norm, scaler, vix_norm, vix_scaler)`; VIX taken at `t+1`.
+- Checkpoint: `train(..., vix_scaler=)` saves `"vix_scaler"`.
+- Sampling: `vix_cond_gen`, `_reverse(..., vix=)`, `generate_path(..., vix_cond=, vix_scaler=)` in `factor_diffusion_sample.py`; `--vix` in its `__main__`.
+
+---

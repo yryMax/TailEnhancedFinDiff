@@ -121,6 +121,9 @@ class FactorModel:
     # parquet path(s) used to fit the model
     data_source: str = ""
 
+    # stock IDs aligned to axis-1 (S) of beta/res_std/residuals; same order as R's pivot columns
+    csecids: np.ndarray = field(default_factory=lambda: np.array([]))
+
     def save(self, prefix: str) -> None:
         """
         Persist the fitted model to disk.
@@ -142,7 +145,8 @@ class FactorModel:
             factor_index=np.array(self.F.index.astype(str).tolist()),
             features=np.array(self.features),
             stock_ids=np.array(self.stock_ids),
-            data_source=np.array(self.data_source)
+            data_source=np.array(self.data_source),
+            csecids=np.asarray(self.csecids),
         )
 
         print(f"Model saved to {prefix}/factors.csv and {prefix}/model.npz")
@@ -169,6 +173,7 @@ class FactorModel:
             features=npz["features"].tolist(),
             stock_ids=stock_ids,
             data_source=npz["data_source"].tolist(),
+            csecids=npz["csecids"] if "csecids" in npz.files else np.array([]),
         )
 
 def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
@@ -223,31 +228,89 @@ def fit_beta(F: pd.DataFrame, R: pd.DataFrame, path: str) -> FactorModel:
     factor_type = "portsort" if "alpha" not in F.columns else "regression"
     return FactorModel(F=F_aligned, beta=beta, res_std=res_std, res_df=res_df,
                        residuals=residuals, factor_type=factor_type,
-                       stock_ids=list(R_aligned.columns), data_source=path)
+                       stock_ids=list(R_aligned.columns), data_source=path,
+                       csecids=R_aligned.columns.to_numpy())
 
 
-def reconstruct_returns(model: FactorModel, fs: np.ndarray) -> np.ndarray:
+def reconstruct_returns(model: FactorModel, fs: np.ndarray,
+                        return_components: bool = False):
     """
     Reconstruct stock returns from factor samples via R = F @ beta + idiosyncratic noise.
     Idiosyncratic noise is drawn from a scaled Student-t fitted to model residuals.
     :param model: fitted FactorModel
     :param fs:    (N, K) factor samples — column order must match model.F
-    :return:      (N, S) reconstructed stock returns
+    :param return_components: if True, return (R, systematic, idiosyncratic).
+    :return:      (N, S) reconstructed stock returns, or tuple of three (N, S) arrays.
     """
     N, S = fs.shape[0], model.beta.shape[1]
     systematic = fs @ model.beta
 
-    res_df = np.asarray(model.res_df)
-    noise = np.empty((N, S))
-    for s in range(S):
-        df_s = float(res_df[s])
-        if np.isfinite(df_s):
-            noise[:, s] = np.random.standard_t(df_s, size=N) * np.sqrt((df_s - 2) / df_s)
-        else:
-            noise[:, s] = np.random.randn(N)
+    # Vectorized scaled Student-t via t = z / sqrt(chi2/df). For non-finite df,
+    # use a large df (effectively standard normal).
+    res_df  = np.asarray(model.res_df, dtype=np.float64)
+    df_use  = np.where(np.isfinite(res_df), res_df, 1e6)           # (S,)
+    z       = np.random.standard_normal((N, S))
+    chi2    = np.random.chisquare(df_use, size=(N, S))
+    noise   = z / np.sqrt(chi2 / df_use) * np.sqrt((df_use - 2) / df_use)
 
     idiosyncratic = noise * model.res_std
-    return systematic + idiosyncratic
+    total = systematic + idiosyncratic
+    if return_components:
+        return total, systematic, idiosyncratic
+    return total
+
+
+def _path_dates(dates, T):
+    """Validate/normalize a length-T date array; None -> all-NaT. No bdate_range
+    synthesis — callers must pass the real trading-day calendar to stay aligned with
+    the OOS ground truth (bdate_range silently includes market holidays)."""
+    if dates is None:
+        return np.full(T, np.datetime64("NaT"), dtype="datetime64[ns]")
+    dates = pd.DatetimeIndex(dates).values
+    if len(dates) != T:
+        raise ValueError(f"dates length {len(dates)} != path length T={T}")
+    return dates
+
+
+def save_reconstructed_stocks(R: np.ndarray, csecids, out_path: str,
+                              dates=None) -> None:
+    """
+    Long-format parquet of reconstructed stock returns (parquet, not CSV: the dense
+    N*S*T table is huge — parquet is ~10x smaller and far faster to read/write).
+    :param R:       (N, S, T) reconstructed stock returns
+    :param csecids: length-S array of stock IDs (axis-1 of R)
+    :param dates:   length-T array of the actual calendar dates of the path (real trading
+                    days, not synthesized); None -> NaT for all rows
+    Columns: path_id, csecid, date, returns
+    """
+    N, S, T = R.shape
+    dates = _path_dates(dates, T)
+    pd.DataFrame({
+        "path_id": np.repeat(np.arange(N), S * T),
+        "csecid":  np.tile(np.repeat(np.asarray(csecids), T), N),
+        "date":    np.tile(dates, N * S),
+        "returns": R.reshape(-1),
+    }).to_parquet(out_path, index=False)
+
+
+def save_reconstructed_factors(F: np.ndarray, factor_names, out_path: str,
+                               dates=None) -> None:
+    """
+    Long-format parquet of generated factor returns.
+    :param F:            (N, K, T) factor returns
+    :param factor_names: length-K list of factor names (axis-1 of F)
+    :param dates:        length-T array of the actual calendar dates of the path (real
+                         trading days, not synthesized); None -> NaT
+    Columns: path_id, factor_name, date, returns.
+    """
+    N, K, T = F.shape
+    dates = _path_dates(dates, T)
+    pd.DataFrame({
+        "path_id":     np.repeat(np.arange(N), K * T),
+        "factor_name": np.tile(np.repeat(np.asarray(factor_names), T), N),
+        "date":        np.tile(dates, N * K),
+        "returns":     F.reshape(-1),
+    }).to_parquet(out_path, index=False)
 
 
 def returns_to_panel(model: FactorModel, generated_returns: np.ndarray, *,
@@ -341,6 +404,47 @@ def get_factor_model(path: str, features: list[str]) -> FactorModel:
     model = fit_beta(F, R, path)
     return model
 
+def dump_to_achievement(model: FactorModel, fs_path: str, out_dir: str = "achievement",
+                        dates=None) -> tuple[str, str]:
+    """
+    End-to-end: load generated factor paths, reconstruct stock returns, and dump both
+    factor and stock returns as long-format parquet files under `out_dir`.
+
+    :param model:      fitted FactorModel (must carry .csecids; refit if loaded from an
+                       old checkpoint that predates the csecids field)
+    :param fs_path:    .npy of generated factor paths, shape (N, F, T) or (N, F) for a
+                       single cross-section. F is the non-alpha factor count and must
+                       equal len(model.F.columns) - 1, ordered as model.F.columns[1:].
+    :param out_dir:    output directory (created if missing)
+    :param dates:      length-T array of the path's real calendar dates; None -> NaT dates
+    :return:           (stocks_path, factors_path); file stems taken from fs_path
+    """
+
+    fs = np.load(fs_path)
+    if fs.ndim == 2:                       # (N, F) single cross-section -> (N, F, 1)
+        fs = fs[:, :, None]
+    N, F, T = fs.shape
+
+    factor_names = list(model.F.columns[1:])   # drop the 'alpha' intercept column
+
+    alpha   = np.ones((N, 1, T), dtype=fs.dtype)
+    fs_full = np.concatenate([alpha, fs], axis=1)                 # (N, F+1, T)
+    fs_flat = fs_full.transpose(0, 2, 1).reshape(N * T, F + 1)    # (N*T, F+1)
+    R_flat  = reconstruct_returns(model, fs_flat)                 # (N*T, S)
+    S       = R_flat.shape[1]
+    R       = R_flat.reshape(N, T, S).transpose(0, 2, 1)         # (N, S, T)
+
+    os.makedirs(out_dir, exist_ok=True)
+    stem         = os.path.splitext(os.path.basename(fs_path))[0]
+    stocks_path  = f"{out_dir}/{stem}_stocks.parquet"
+    factors_path = f"{out_dir}/{stem}_factors.parquet"
+
+    save_reconstructed_stocks(R, model.csecids, stocks_path, dates)
+    save_reconstructed_factors(fs, factor_names, factors_path, dates)
+    print(f"Dumped {R.shape} stocks -> {stocks_path}\n"
+          f"Dumped {fs.shape} factors -> {factors_path}")
+    return stocks_path, factors_path
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -355,6 +459,7 @@ if __name__ == '__main__':
     train_path = cfg["train_path"]
     test_path  = cfg["test_path"]
 
+    # stock return to factor return
     print(f"Factor model on {prefix}  (train={train_path}, test={test_path})")
     get_factor_model(train_path, features).save(prefix)
     get_factor_model(test_path,  features).save(f"{prefix}/test")

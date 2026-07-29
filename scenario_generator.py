@@ -108,6 +108,37 @@ class GaussianSampler(FactorSampler):
             return np.empty((0, D))
         return np.stack(accepted[:num_generate])
 
+    def cond_generate_truncated(self, num_generate: int, feature_idx: int,
+                                lo: float = None, hi: float = None) -> np.ndarray:
+        """
+        Closed-form conditional sampling for a single-coordinate interval constraint
+        lo < x[feature_idx] < hi (bounds in original space, None = unbounded).
+
+        Exact for a multivariate normal: the constrained coordinate is drawn from its
+        truncated marginal, the rest from the Gaussian conditional given that draw.
+        Use this instead of cond_generate when the constraint sits so far in the tail
+        that rejection sampling never accepts (e.g. a -30% monthly stress is ~ -9 sigma
+        for daily factor returns).
+        """
+        from scipy.stats import truncnorm
+        mu_i = self.mean[feature_idx]
+        s_i = np.sqrt(self.cov[feature_idx, feature_idx])
+        a = -np.inf if lo is None else (lo - mu_i) / s_i
+        b = np.inf if hi is None else (hi - mu_i) / s_i
+        xi = truncnorm.rvs(a, b, loc=mu_i, scale=s_i, size=num_generate, random_state=self.rng)
+
+        rest = [j for j in range(len(self.mean)) if j != feature_idx]
+        S_ri = self.cov[rest, feature_idx]
+        S_ii = self.cov[feature_idx, feature_idx]
+        cond_mean = self.mean[rest] + np.outer(xi - mu_i, S_ri / S_ii)
+        cond_cov = self.cov[np.ix_(rest, rest)] - np.outer(S_ri, S_ri) / S_ii
+
+        out = np.empty((num_generate, len(self.mean)))
+        out[:, feature_idx] = xi
+        out[:, rest] = cond_mean + self.rng.multivariate_normal(
+            np.zeros(len(rest)), cond_cov, size=num_generate)
+        return out
+
 class DiffusionSampler(FactorSampler):
     def __init__(self, checkpoint_path: str, device: str = None,
                  guidance_scale: float = 1.0, guidance_decay_pow: float = 1.0):

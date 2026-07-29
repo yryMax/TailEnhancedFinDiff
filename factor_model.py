@@ -279,9 +279,16 @@ def returns_to_panel(model: FactorModel, generated_returns: np.ndarray, *,
 
     stock_ids = list(model.stock_ids) if len(model.stock_ids) else sorted(source_df["csecid"].unique())
     generated_returns = np.asarray(generated_returns)
-    if generated_returns.shape != (len(factor_dates), len(stock_ids)):
-        raise ValueError(f"generated_returns {generated_returns.shape} != "
-                         f"(T={len(factor_dates)}, S={len(stock_ids)}); check row/col alignment")
+    if generated_returns.shape[-1] != len(stock_ids):
+        raise ValueError(f"generated_returns last dim {generated_returns.shape[-1]} != "
+                         f"S={len(stock_ids)}; columns must follow model.stock_ids")
+
+    # Simple mode: rows don't align to factor dates -> just map columns to csecid and
+    # return a long [csecid, returns] df (one row per generated cell), no date schema.
+    if generated_returns.shape[0] != len(factor_dates):
+        return (pd.DataFrame(generated_returns, columns=pd.Index(stock_ids, name="csecid"))
+                .stack().rename("returns").reset_index(level="csecid")
+                .reset_index(drop=True)[["csecid", "returns"]])
 
     if shift:
         dates_sorted = sorted(source_df["date"].unique())

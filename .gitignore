@@ -219,3 +219,12 @@ data_generator/.idea
 model/
 checkpoints/
 assets/
+# --- release cleanup: generated artifacts stay out of git ---
+.idea/
+*.pdf
+*.html
+*.zip
+*.parquet
+achievement/
+reference/
+figures_ppt/factor_samples/

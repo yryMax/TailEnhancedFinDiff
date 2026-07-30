@@ -24,7 +24,7 @@ conda activate diffusion_factor_model
 ├── init_experiment.py            # scaffold a new experiment under model/<exp_name>/
 │
 ├── factor_evaluation.ipynb           # cross-sectional factor eval (moments, KDE, Q-Q, corr)
-├── stock_evaluation.ipynb            # cross-sectional stock eval + portfolio-value bands
+├── stock_evaluation.ipynb            # stock eval(cross-sectional + temporal)
 ├── conditional_evaluation.ipynb      # stress conditioning: guidance vs rejection vs truncated Gaussian
 ├── temporal_factor_evaluation.ipynb  # temporal model: factor path eval  (exp: temporal_cond)
 ├── temporal_stock_evaluation.ipynb   # temporal model: stock path eval   (exp: temporal_cond)
@@ -85,14 +85,17 @@ rollout from a real out-of-sample day; `--vix 40` conditions the whole path on a
 All result artifacts (pdf/png/parquet) are kept **out of git**; final versions live on the
 company drive (`drive_export/`, see its `MANIFEST.md`). Every artifact can be regenerated:
 
-| artifact                       | how to regenerate                                                          |
-|--------------------------------|----------------------------------------------------------------------------|
-| factor-level eval report       | run `factor_evaluation.ipynb` (set `_exp`)                                 |
-| stock-level eval + PV bands    | run `stock_evaluation.ipynb`                                               |
+| artifact                      | how to regenerate                                                          |
+|-------------------------------|----------------------------------------------------------------------------|
+| factor-level eval report      | run `factor_evaluation.ipynb` (set `_exp`)                                 |
+| stock-level eval    | run `stock_evaluation.ipynb`                                               |
 | stress-conditioning comparison | run `conditional_evaluation.ipynb`                                         |
-| per-day counterfactual panels  | run `style_transfer.ipynb`                                                 |
-| temporal path evals            | run `temporal_factor_evaluation.ipynb` / `temporal_stock_evaluation.ipynb` |
-| downstream tasks               | run `gics.ipynb`                                                           |
+| per-day counterfactual panels | run `style_transfer.ipynb`                                                 |
+| temporal path evals           | run `temporal_factor_evaluation.ipynb` / `temporal_stock_evaluation.ipynb` |
+| downstream tasks              | run `gics.ipynb`                                                           |
+
+
+
 Notebooks set their target experiment via the `_exp` variable in the first cell. To
 reproduce your own results, set `_exp` to the experiment name of interest and run the notebook.
 ## Credits

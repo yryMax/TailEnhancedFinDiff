@@ -29,7 +29,7 @@ conda activate diffusion_factor_model
 ├── temporal_factor_evaluation.ipynb  # temporal model: factor path eval  (exp: temporal_cond)
 ├── temporal_stock_evaluation.ipynb   # temporal model: stock path eval   (exp: temporal_cond)
 ├── vix_conditional_evaluation.ipynb  # VIX-conditioned generation eval   (exp: vix)
-├── gics.ipynb                        # GICS sector-level analysis
+├── gics.ipynb                        # Downstream tasks
 │
 ├── metrics/                      # reusable evaluation metrics (statistic / temporal / risk)
 ```
@@ -78,32 +78,24 @@ Everything is driven by `model/<exp_name>/cfg.yaml`. Key switches:
 Sampling extras (temporal checkpoints): `--seed-oos` / `--seed-date YYYY-MM-DD` seed the
 rollout from a real out-of-sample day; `--vix 40` conditions the whole path on a VIX level.
 
-The checkpoint stores its own `cfg`, scaler(s), and (if used) the L-noise Cholesky, so
-inference is always consistent with training — `DiffusionSampler(ckpt_path)` needs
-nothing else.
+**For every time you evaluate always refer to the checkpoint's stored configuration**
 
-## Evaluation & regenerating artifacts
+## Evaluation 
 
 All result artifacts (pdf/png/parquet) are kept **out of git**; final versions live on the
 company drive (`drive_export/`, see its `MANIFEST.md`). Every artifact can be regenerated:
 
-| artifact | how to regenerate |
-|---|---|
-| factor-level eval report | run `factor_evaluation.ipynb` (set `_exp`) |
-| stock-level eval + PV bands | run `stock_evaluation.ipynb` |
-| stress-conditioning comparison | run `conditional_evaluation.ipynb` |
-| per-day counterfactual panels | run `style_transfer.ipynb` |
-| temporal path evals | run `temporal_factor_evaluation.ipynb` / `temporal_stock_evaluation.ipynb` |
-| VIX regime scenarios | run `vix_conditional_evaluation.ipynb` |
-| presentation figures | `python figures_ppt/make_figs.py`, `python figures_ppt/make_violins.py` |
-| correlation ablation | `python ablations/corr.py` (see `ablations/corr.md`) |
-| data-scaling ablation | `python ablations/data_scaling.py` (results csv committed) |
-| generated sample paths (`achievement/`) | `python factor_diffusion_sample.py temporal_cond --seed-oos` |
-
-Notebooks set their target experiment via the `_exp` variable in the first cell.
-
+| artifact                       | how to regenerate                                                          |
+|--------------------------------|----------------------------------------------------------------------------|
+| factor-level eval report       | run `factor_evaluation.ipynb` (set `_exp`)                                 |
+| stock-level eval + PV bands    | run `stock_evaluation.ipynb`                                               |
+| stress-conditioning comparison | run `conditional_evaluation.ipynb`                                         |
+| per-day counterfactual panels  | run `style_transfer.ipynb`                                                 |
+| temporal path evals            | run `temporal_factor_evaluation.ipynb` / `temporal_stock_evaluation.ipynb` |
+| downstream tasks               | run `gics.ipynb`                                                           |
+Notebooks set their target experiment via the `_exp` variable in the first cell. To
+reproduce your own results, set `_exp` to the experiment name of interest and run the notebook.
 ## Credits
 
-DLPM implementation adapted from https://github.com/darioShar/DLPM
-(`bndm`: https://github.com/xchhuang/bndm was consulted for baselines; neither is vendored —
-both former submodules were removed, the code here is self-contained).
+DLPM: https://github.com/darioShar/DLPM
+BNDM: https://github.com/xchhuang/bndm

@@ -217,9 +217,11 @@ output/
 data_generator/SP500
 data_generator/.idea
 *.png
-model/
+model/*
+!model/.gitkeep
 checkpoints/
-assets/
+assets/*
+!assets/.gitkeep
 # --- release cleanup: generated artifacts stay out of git ---
 .idea/
 *.pdf

@@ -27,8 +27,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-data/*
-!data/
+legacy/
+data_another/*
+!data_another/
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -227,4 +228,5 @@ assets/
 *.parquet
 achievement/
 reference/
-figures_ppt/factor_samples/
+assets/figures_ppt/factor_samples/
+/legacy/

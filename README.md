@@ -2,21 +2,6 @@
 
 Heavy-tail-aware diffusion models for financial scenario generation.
 
-A two-stage pipeline: (1) a **factor model** compresses the stock cross-section into a small
-set of factor returns (OLS betas + Student-t idiosyncratic residuals); (2) a **denoising
-diffusion model** learns the factor return distribution and generates synthetic scenarios,
-which are mapped back to full stock cross-sections. The diffusion stage implements **DLPM**
-(Denoising Lévy Probabilistic Models): the Gaussian noise of DDPM is replaced by SαS Lévy
-noise (`levy_alpha < 2`), which fattens the tails of the learned distribution;
-`levy_alpha = 2` degenerates exactly to DDPM.
-
-Two diffusion model families live in this codebase and are **auto-detected from the
-checkpoint** — no flags needed at inference:
-
-| family | class | trains on | generates | experiments |
-|---|---|---|---|---|
-| cross-sectional | `FactorDenoiserXS` | i.i.d. daily factor cross-sections | one day at a time | `stable`, `new_factors`, `DDPM`, `ablation`, `dow30`, `data_scaling`, ... |
-| conditional temporal | `FactorDenoiser` (DiT + AdaLN-Zero) | Markov-1 pairs `(F_t → F_{t+1})` with CFG-style null-token dropout, optional VIX conditioning | self-starting autoregressive paths | `temporal_cond`, `vix` |
 
 ## Setup
 
@@ -41,27 +26,27 @@ conda activate diffusion_factor_model
 ├── factor_evaluation.ipynb           # cross-sectional factor eval (moments, KDE, Q-Q, corr)
 ├── stock_evaluation.ipynb            # cross-sectional stock eval + portfolio-value bands
 ├── conditional_evaluation.ipynb      # stress conditioning: guidance vs rejection vs truncated Gaussian
-├── style_transfer.ipynb              # per-day OOS counterfactuals (SDEdit, e.g. "Value −30%")
 ├── temporal_factor_evaluation.ipynb  # temporal model: factor path eval  (exp: temporal_cond)
 ├── temporal_stock_evaluation.ipynb   # temporal model: stock path eval   (exp: temporal_cond)
 ├── vix_conditional_evaluation.ipynb  # VIX-conditioned generation eval   (exp: vix)
-├── dow_evaluation.ipynb              # Dow30 1-min cross-section, no factor stage (exp: dow30)
-├── downstream_replica.ipynb          # downstream stress-test replication
 ├── gics.ipynb                        # GICS sector-level analysis
 │
 ├── metrics/                      # reusable evaluation metrics (statistic / temporal / risk)
-├── ablations/                    # correlation-noise & data-scaling ablation scripts + results
-├── figures_ppt/                  # scripts regenerating the presentation figures
-├── analyze_ill_paths.py          # diagnose ill-behaved autoregressive rollouts
-├── massiveDS/pull_minute.py      # Dow30 1-minute data downloader
-├── CLAUDE.md                     # design notes: DLPM math, bug post-mortems, guidance theory
-└── legacy/                       # earlier experiments (not part of the main pipeline)
 ```
 
 ## Data
 
 Raw data are `.parquet` train/test splits (not in git). Each row needs: `returns`,
 `stock_id` (`csecid`), and the characteristics of interest (size, value, momentum, ...).
+
+## Checkpoints Structure
+Two diffusion model families live in this codebase and are auto-detected from the
+checkpoint
+
+| family | class | trains on | generates | experiments |
+|---|---|---|---|---|
+| cross-sectional | `FactorDenoiserXS` | i.i.d. daily factor cross-sections | one day at a time | `stable`, `new_factors`, `DDPM`, `ablation`, `dow30`, `data_scaling`, ... |
+| conditional temporal | `FactorDenoiser` (DiT + AdaLN-Zero) | Markov-1 pairs `(F_t → F_{t+1})` with CFG-style null-token dropout, optional VIX conditioning | self-starting autoregressive paths | `temporal_cond`, `vix` |
 
 ```
 data/
